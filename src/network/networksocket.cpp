@@ -28,6 +28,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <event2/listener.h>
 #include <event2/util.h>
 #include <event2/event.h>
+#include <sstream>
 #include "networksocket.h"
 
 GenericSocket::GenericSocket(SocketProtocol proto, SocketFamily family, u16 port) :
@@ -37,23 +38,29 @@ GenericSocket::GenericSocket(SocketProtocol proto, SocketFamily family, u16 port
 {
 }
 
-#if defined(__linux__)
-static int setnonblock(int fd) {
-	int flags;
+static void
+on_accept(struct evconnlistener *listener, evutil_socket_t fd, struct sockaddr *address,
+	int socklen, void *ctx)
+{
+	/* We got a new connection! Set up a bufferevent for it. */
+	struct event_base *base = evconnlistener_get_base(listener);
+	struct bufferevent *bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
 
-	flags = fcntl(fd, F_GETFL);
-	if (flags < 0) return flags;
-	flags |= O_NONBLOCK;
-	if (fcntl(fd, F_SETFL, flags) < 0) return -1;
-	return 0;
-}
-#endif
+	//bufferevent_setcb(bev, echo_read_cb, NULL, echo_event_cb, NULL);
 
-static void on_accept(evutil_socket_t fd, short ev, void *arg) {
-
+	bufferevent_enable(bev, EV_READ | EV_WRITE);
 }
 
-#define CONNECTION_BACKLOG 16
+static void accept_error_cb(struct evconnlistener *listener, void *ctx)
+{
+	struct event_base *base = evconnlistener_get_base(listener);
+	int err = EVUTIL_SOCKET_ERROR();
+	std::stringstream ss;
+	ss << "Got an error " << err << " (" << evutil_socket_error_to_string(err)
+		<< ") on the SocketListenerThread." << std::endl;
+	event_base_loopexit(base, NULL);
+	throw SocketException(ss.str());
+}
 
 void *SocketListenerThread::run()
 {
@@ -91,42 +98,26 @@ void *SocketListenerThread::run()
 
 	setName("SocketListenerThread (0.0.0.0:" + std::to_string(m_port) + ")");
 
-	if (bind(sockfd, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
-		throw SocketException("Failed to bind SocketListenerThread.");
-	}
-
-	if (listen(sockfd, CONNECTION_BACKLOG) < 0) {
-		throw SocketException("Failed to listen SocketListenerThread.");
-	}
-
-	int reuseaddr = 1;
-	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
-
-	if (setnonblock(sockfd) < 0) {
-		throw SocketException("Failed to set socket in non blocking mode.");
-	}
-
-	static struct event_base *evbase_accept;
-
-	if ((evbase_accept = event_base_new()) == NULL) {
+	struct event_base *evbase_accept;
+	if (!(evbase_accept = event_base_new())) {
 		close(sockfd);
 		throw SocketException("Failed to create libevent base on SocketListenerThread");
 	}
 
-	struct event *ev_accept;
+	evconnlistener *listener = evconnlistener_new_bind(evbase_accept, on_accept, NULL,
+		LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1,
+		(struct sockaddr *) &listen_addr, sizeof(listen_addr));
 
-	ev_accept = event_new(evbase_accept, sockfd, EV_READ|EV_PERSIST,
-			on_accept, nullptr);
-			//on_accept, (void *)&workqueue);
-	event_add(ev_accept, NULL);
+	if (!listener) {
+		event_base_free(evbase_accept);
+		throw SocketException("Failed to create libevent listener");
+	}
 
-	/* Start the event loop. */
+	evconnlistener_set_error_cb(listener, accept_error_cb);
+
+	/* Lets rock */
 	event_base_dispatch(evbase_accept);
-
 	event_base_free(evbase_accept);
-	evbase_accept = NULL;
-
-	close(sockfd);
 
 	return nullptr;
 }
