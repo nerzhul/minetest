@@ -21,13 +21,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <netinet/in.h>
 #include <debug.h>
 #include <socket.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
 #include <event2/listener.h>
-#include <event2/util.h>
-#include <event2/event.h>
 #include <sstream>
 #include "networksocket.h"
 
@@ -38,15 +35,26 @@ GenericSocket::GenericSocket(SocketProtocol proto, SocketFamily family, u16 port
 {
 }
 
-static void
-on_accept(struct evconnlistener *listener, evutil_socket_t fd, struct sockaddr *address,
-	int socklen, void *ctx)
+class Session
+{
+public:
+	Session() {}
+	~Session() {}
+};
+
+static void on_read_callback(struct bufferevent *bev, void *arg)
+{
+
+}
+
+static void on_accept(struct evconnlistener *listener, evutil_socket_t fd,
+	struct sockaddr *address, int socklen, void *ctx)
 {
 	/* We got a new connection! Set up a bufferevent for it. */
 	struct event_base *base = evconnlistener_get_base(listener);
 	struct bufferevent *bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
 
-	//bufferevent_setcb(bev, echo_read_cb, NULL, echo_event_cb, NULL);
+	bufferevent_setcb(bev, on_read_callback, NULL, NULL, new Session());
 
 	bufferevent_enable(bev, EV_READ | EV_WRITE);
 }
