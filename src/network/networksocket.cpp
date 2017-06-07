@@ -27,6 +27,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <event2/listener.h>
 #include <sstream>
 #include "networksocket.h"
+#include "networkpacket.h"
 
 GenericSocket::GenericSocket(SocketProtocol proto, SocketFamily family, u16 port) :
 	m_proto(proto),
@@ -38,13 +39,20 @@ GenericSocket::GenericSocket(SocketProtocol proto, SocketFamily family, u16 port
 class Session
 {
 public:
-	Session() {}
+	Session(u64 session_id) : m_session_id(session_id) {}
 	~Session() {}
+
+	u64 get_session_id() const { return m_session_id; }
+private:
+	const u64 m_session_id = 0;
 };
 
 static void on_read_callback(struct bufferevent *bev, void *arg)
 {
-
+	char buf[4096];
+	Session *sess = (Session *) arg;
+	std::cout << "Read data: " << bufferevent_read(bev, buf, sizeof(buf))
+			<< " for session " << sess->get_session_id() << std::endl;
 }
 
 static void on_accept(struct evconnlistener *listener, evutil_socket_t fd,
@@ -54,7 +62,7 @@ static void on_accept(struct evconnlistener *listener, evutil_socket_t fd,
 	struct event_base *base = evconnlistener_get_base(listener);
 	struct bufferevent *bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
 
-	bufferevent_setcb(bev, on_read_callback, NULL, NULL, new Session());
+	bufferevent_setcb(bev, on_read_callback, NULL, NULL, new Session(144));
 
 	bufferevent_enable(bev, EV_READ | EV_WRITE);
 }
