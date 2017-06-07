@@ -20,6 +20,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <debug.h>
+#include <socket.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <event2/bufferevent.h>
+#include <event2/buffer.h>
+#include <event2/listener.h>
+#include <event2/util.h>
+#include <event2/event.h>
 #include "networksocket.h"
 
 GenericSocket::GenericSocket(SocketProtocol proto, SocketFamily family, u16 port) :
@@ -29,12 +37,29 @@ GenericSocket::GenericSocket(SocketProtocol proto, SocketFamily family, u16 port
 {
 }
 
-void SocketListener::listen()
-{
-	int sockfd;
-	struct sockaddr_in serv_addr;
+#if defined(__linux__)
+static int setnonblock(int fd) {
+	int flags;
 
-	int sock_family;
+	flags = fcntl(fd, F_GETFL);
+	if (flags < 0) return flags;
+	flags |= O_NONBLOCK;
+	if (fcntl(fd, F_SETFL, flags) < 0) return -1;
+	return 0;
+}
+#endif
+
+static void on_accept(evutil_socket_t fd, short ev, void *arg) {
+
+}
+
+#define CONNECTION_BACKLOG 16
+
+void *SocketListenerThread::run()
+{
+	struct sockaddr_in listen_addr;
+
+	sa_family_t sock_family;
 	switch (m_family) {
 		case SOCK_FAMILY_IPV4: sock_family = AF_INET; break;
 		case SOCK_FAMILY_IPV6: sock_family = AF_INET6; break;
@@ -54,8 +79,54 @@ void SocketListener::listen()
 		default: FATAL_ERROR("Invalid socket type"); break;
 	}
 
-	sockfd = socket(sock_family, sock_type, sock_proto);
-	serv_addr.sin_family = sock_family;
-	serv_addr.sin_addr.s_addr = INADDR_ANY;
-	serv_addr.sin_port = htons(m_port);
+	int sockfd = socket(sock_family, sock_type, sock_proto);
+	if (sockfd < 0) {
+		throw SocketException("Failed to create socket on SocketListenerThread.");
+	}
+
+	memset(&listen_addr, 0, sizeof(listen_addr));
+	listen_addr.sin_family = sock_family;
+	listen_addr.sin_addr.s_addr = INADDR_ANY;
+	listen_addr.sin_port = htons(m_port);
+
+	setName("SocketListenerThread (0.0.0.0:" + std::to_string(m_port) + ")");
+
+	if (bind(sockfd, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
+		throw SocketException("Failed to bind SocketListenerThread.");
+	}
+
+	if (listen(sockfd, CONNECTION_BACKLOG) < 0) {
+		throw SocketException("Failed to listen SocketListenerThread.");
+	}
+
+	int reuseaddr = 1;
+	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
+
+	if (setnonblock(sockfd) < 0) {
+		throw SocketException("Failed to set socket in non blocking mode.");
+	}
+
+	static struct event_base *evbase_accept;
+
+	if ((evbase_accept = event_base_new()) == NULL) {
+		close(sockfd);
+		throw SocketException("Failed to create libevent base on SocketListenerThread");
+	}
+
+	struct event *ev_accept;
+
+	ev_accept = event_new(evbase_accept, sockfd, EV_READ|EV_PERSIST,
+			on_accept, nullptr);
+			//on_accept, (void *)&workqueue);
+	event_add(ev_accept, NULL);
+
+	/* Start the event loop. */
+	event_base_dispatch(evbase_accept);
+
+	event_base_free(evbase_accept);
+	evbase_accept = NULL;
+
+	close(sockfd);
+
+	return nullptr;
 }

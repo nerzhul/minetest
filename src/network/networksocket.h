@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #pragma once
 
+#include "threading/thread.h"
 #include "irrlichttypes.h"
 
 enum SocketProtocol : u8
@@ -43,12 +44,13 @@ protected:
 	u16 m_port = 0;
 };
 
-class SocketListener : private GenericSocket
+class SocketListenerThread : private GenericSocket, public Thread
 {
 public:
-	SocketListener(SocketProtocol proto, SocketFamily family, u16 port) :
-		GenericSocket(proto, family, port)
+	SocketListenerThread(SocketProtocol proto, SocketFamily family, u16 port) :
+		GenericSocket(proto, family, port),
+		Thread()
 	{}
 
-	void listen();
+	void *run();
 };

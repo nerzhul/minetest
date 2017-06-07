@@ -17,6 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
+#include <network/networksocket.h>
 #include "irrlicht.h" // createDevice
 
 #include "mainmenumanager.h"
@@ -171,6 +172,9 @@ int main(int argc, char *argv[])
 		list_worlds();
 		return 0;
 	}
+
+	SocketListenerThread * slt = new SocketListenerThread(PROTOCOL_TCP, SOCK_FAMILY_IPV4, 30000);
+	slt->start();
 
 	if (!init_common(cmd_args, argc, argv))
 		return 1;
