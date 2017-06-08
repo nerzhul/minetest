@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #pragma once
 
+#include <event2/util.h>
 #include "threading/thread.h"
 #include "irrlichttypes.h"
 
@@ -53,4 +54,8 @@ public:
 	{}
 
 	void *run();
+
+private:
+	static void on_accept(struct evconnlistener *listener, evutil_socket_t fd,
+		struct sockaddr *address, int socklen, void *ctx);
 };
