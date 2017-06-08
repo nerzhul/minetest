@@ -52,12 +52,17 @@ public:
 	}
 
 private:
-	NetworkSession(u64 session_id) : m_session_id(session_id) {}
+	NetworkSession(u64 session_id, evutil_socket_t fd) :
+		m_session_id(session_id),
+		m_fd(fd)
+	{}
+
 	~NetworkSession() {}
 
 	const u64 m_session_id = 0;
 	std::vector<u8> m_recv_buf = {};
 	u64 m_recv_buf_offset = 0;
+	evutil_socket_t m_fd;
 };
 
 class NetworkSessionMgr
@@ -66,9 +71,9 @@ public:
 	NetworkSessionMgr() {}
 	~NetworkSessionMgr() {}
 
-	NetworkSession *create_new_session()
+	NetworkSession *create_new_session(evutil_socket_t fd)
 	{
-		NetworkSession *sess = new NetworkSession(m_new_session_next_id);
+		NetworkSession *sess = new NetworkSession(m_new_session_next_id, fd);
 
 		std::unique_lock<std::mutex> m_lock(m_mutex);
 		m_sessions[m_new_session_next_id] = sess;
@@ -133,7 +138,7 @@ void SocketListenerThread::on_accept(struct evconnlistener *listener, evutil_soc
 	struct bufferevent *bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
 
 	bufferevent_setcb(bev, on_read_callback, NULL, on_event_callback,
-		sessionMgr.create_new_session());
+		sessionMgr.create_new_session(fd));
 
 	bufferevent_enable(bev, EV_READ | EV_WRITE);
 }
