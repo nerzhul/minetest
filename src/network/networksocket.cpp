@@ -69,21 +69,25 @@ public:
 	NetworkSession *create_new_session()
 	{
 		NetworkSession *sess = new NetworkSession(m_new_session_next_id);
-		m_sessions[m_new_session_next_id] = sess;
 
+		std::unique_lock<std::mutex> m_lock(m_mutex);
+		m_sessions[m_new_session_next_id] = sess;
 		m_new_session_next_id++;
 		return sess;
 	}
 
 	void drop_session(NetworkSession *sess)
 	{
+		std::unique_lock<std::mutex> m_lock(m_mutex);
+
 		m_sessions.erase(sess->get_session_id());
-		// Send event to Server ?
+		// TODO: Send event to Server
 		delete sess;
 	}
 private:
 	std::unordered_map<u64, NetworkSession *> m_sessions = {};
 	u64 m_new_session_next_id = 1;
+	std::mutex m_mutex;
 };
 
 static NetworkSessionMgr sessionMgr;
@@ -154,7 +158,7 @@ void *SocketListenerThread::run()
 			sock_type = SOCK_DGRAM;
 			sock_proto = IPPROTO_UDP;
 			break;
-		default: FATAL_ERROR("Invalid socket type"); break;
+		default: FATAL_ERROR("Invalid socket type");
 	}
 
 	int sockfd = socket(sock_family, sock_type, sock_proto);

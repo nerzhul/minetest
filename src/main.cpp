@@ -173,8 +173,19 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 
-	SocketListenerThread * slt = new SocketListenerThread(PROTOCOL_TCP, SOCK_FAMILY_IPV4, 30000);
+	SocketListenerThread *slt = new SocketListenerThread(PROTOCOL_TCP,
+		SOCK_FAMILY_IPV4, 30000);
 	slt->start();
+//	SocketListenerThread *sltv6 = new SocketListenerThread(PROTOCOL_TCP,
+//		SOCK_FAMILY_IPV6, 30000);
+//	sltv6->start();
+//	SocketListenerThread *slu = new SocketListenerThread(PROTOCOL_UDP,
+//		SOCK_FAMILY_IPV4, 30000);
+//	slu->start();
+//	SocketListenerThread *sluv6 = new SocketListenerThread(PROTOCOL_UDP,
+//		SOCK_FAMILY_IPV6, 30000);
+//	sluv6->start();
+
 
 	if (!init_common(cmd_args, argc, argv))
 		return 1;
