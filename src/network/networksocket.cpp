@@ -28,6 +28,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <sstream>
 #include <functional>
 #include "networksocket.h"
+#include "util/serialize.h"
 #include "networkpacket.h"
 
 GenericSocket::GenericSocket(SocketProtocol proto, SocketFamily family, u16 port) :
@@ -37,18 +38,54 @@ GenericSocket::GenericSocket(SocketProtocol proto, SocketFamily family, u16 port
 {
 }
 
+#define MAX_VALID_PACKET_SIZE 10 * 1024 * 1024
+
 class NetworkSessionMgr;
 
 class NetworkSession
 {
 	friend class NetworkSessionMgr;
 public:
+	enum State: u8 {
+		NETSESSION_STATE_OK,
+		NETSESSION_STATE_READ_ERROR,
+		NETSESSION_STATE_READ_ERROR_PKT_SIZE,
+		NETSESSION_STATE_WAITING_DATA,
+	};
 	u64 get_session_id() const { return m_session_id; }
-	void push_recv_data(const u8 *data, size_t len)
+
+	NetworkSession::State push_recv_data(const u8 *data, size_t len)
 	{
-		m_recv_buf.resize(m_recv_buf.size() + len);
-		memcpy(&m_recv_buf[m_recv_buf_offset], data, len);
-		m_recv_buf_offset += len;
+		size_t data_len = len;
+		const u8 *data_ptr = data;
+
+		/*
+		 * m_packet_size <= 0: previous read was complete
+		 *
+		 * Read new packet size
+		 */
+		if (m_packet_size <= 0) {
+			if (!read_size_header(data, len)) {
+				return NETSESSION_STATE_READ_ERROR;
+			}
+
+			if (m_packet_size > MAX_VALID_PACKET_SIZE) {
+				return NETSESSION_STATE_READ_ERROR_PKT_SIZE;
+			}
+
+			data_len = len - sizeof(int);
+			if (!data_len) {
+				return NETSESSION_STATE_WAITING_DATA;
+			}
+
+			data_ptr = &data[sizeof(int)];
+		}
+
+		m_recv_buf.resize(m_recv_buf.size() + data_len);
+		memcpy(&m_recv_buf[m_recv_buf_offset], data_ptr, data_len);
+		m_recv_buf_offset += data_len;
+
+		return NETSESSION_STATE_OK;
 	}
 
 private:
@@ -59,10 +96,23 @@ private:
 
 	~NetworkSession() {}
 
+	bool read_size_header(const u8 *data, size_t len)
+	{
+		if (len < sizeof(int)) {
+			return false;
+		}
+
+		m_packet_size = readU32(data);
+		return m_packet_size >= 0;
+	}
+
 	const u64 m_session_id = 0;
 	std::vector<u8> m_recv_buf = {};
 	u64 m_recv_buf_offset = 0;
+	s32 m_packet_size = -1;
 	evutil_socket_t m_fd;
+
+	NetworkSession::State m_state = NETSESSION_STATE_OK;
 };
 
 class NetworkSessionMgr
@@ -101,6 +151,8 @@ static void on_read_callback(struct bufferevent *bev, void *ctx)
 {
 	u8 buf[4096];
 	NetworkSession *sess = (NetworkSession *) ctx;
+
+	// Move that to network session
 	size_t rd_len = bufferevent_read(bev, buf, sizeof(buf));
 	std::cout << "Read data: " << rd_len
 			<< " for session " << sess->get_session_id() << std::endl;
