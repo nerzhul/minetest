@@ -109,8 +109,9 @@ static void on_event_callback(struct bufferevent *bev, short events, void *ctx)
 		NetworkSession *sess = (NetworkSession *)ctx;
 		std::cout << "Connection terminated for session " << sess->get_session_id() << std::endl;
 		sessionMgr.drop_session(sess);
-		bufferevent_free(bev);
 	}
+
+	bufferevent_free(bev);
 }
 
 static void accept_error_cb(struct evconnlistener *listener, void *ctx)
