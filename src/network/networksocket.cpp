@@ -231,27 +231,26 @@ void *SocketListenerThread::run()
 
 	setName("SocketListenerThread (0.0.0.0:" + std::to_string(m_port) + ")");
 
-	struct event_base *evbase_accept;
-	if (!(evbase_accept = event_base_new())) {
+	std::unique_ptr<event_base, decltype(&event_base_free)>
+		evbase_accept(event_base_new(), &event_base_free);
+	if (!evbase_accept.get()) {
 		close(sockfd);
 		throw SocketException("Failed to create libevent base on SocketListenerThread");
 	}
 
-	evconnlistener *listener = evconnlistener_new_bind(evbase_accept,
+	evconnlistener *listener = evconnlistener_new_bind(evbase_accept.get(),
 		&SocketListenerThread::on_accept, NULL,
 		LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1,
 		(struct sockaddr *) &listen_addr, sizeof(listen_addr));
 
 	if (!listener) {
-		event_base_free(evbase_accept);
 		throw SocketException("Failed to create libevent listener");
 	}
 
 	evconnlistener_set_error_cb(listener, accept_error_cb);
 
 	/* Lets rock */
-	event_base_dispatch(evbase_accept);
-	event_base_free(evbase_accept);
+	event_base_dispatch(evbase_accept.get());
 
 	return nullptr;
 }
