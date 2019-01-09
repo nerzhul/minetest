@@ -76,6 +76,12 @@ int getInputDialogState();
  */
 std::string getInputDialogValue();
 
+/**
+ * Import strstr function from FreeBSD libc
+ * https://svnweb.freebsd.org/base/stable/11/lib/libc/string/strstr.c?revision=331722&view=co
+ */
+char *strstr(const char *s, const char *find);
+
 #ifndef SERVER
 float getDisplayDensity();
 v2u32 getDisplaySize();

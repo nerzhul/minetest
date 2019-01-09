@@ -19,7 +19,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "tile.h"
 
-#include <cstring>
 #include <algorithm>
 #include <ICameraSceneNode.h>
 #include "util/string.h"
@@ -37,6 +36,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #ifdef __ANDROID__
 #include <GLES/gl.h>
+#include "porting_android.h"
 #endif
 
 /*
