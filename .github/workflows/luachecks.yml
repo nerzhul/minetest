@@ -1,6 +1,6 @@
 # This is a basic workflow to help you get started with Actions
 
-name: CI
+name: Lua checks
 
 # Controls when the action will run. Triggers the workflow on push or pull request
 # events but only for the master branch
@@ -36,5 +36,5 @@ jobs:
         
     - name: Run checks
       run: |
-        - $HOME/.luarocks/bin/luacheck builtin
-        - $HOME/.luarocks/bin/busted builtin
+        $HOME/.luarocks/bin/luacheck builtin
+        $HOME/.luarocks/bin/busted builtin
