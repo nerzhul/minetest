@@ -959,7 +959,7 @@ static bool migrate_map_database(const GameParams &game_params, const Settings &
 		return false;
 	}
 
-	std::string backend = world_mt.getBackend();
+	std::string backend = world_mt.getMapBackend();
 	if (backend == migrate_to) {
 		errorstream << "Cannot migrate: new backend is same"
 			<< " as the old one" << std::endl;
@@ -1000,11 +1000,6 @@ static bool migrate_map_database(const GameParams &game_params, const Settings &
 	delete new_db;
 
 	actionstream << "Successfully migrated " << count << " blocks" << std::endl;
-	world_mt.setBackend(migrate_to);
-	if (!world_mt.updateConfigFile())
-		errorstream << "Failed to update world.mt!" << std::endl;
-	else
-		actionstream << "world.mt updated" << std::endl;
-
+	world_mt.setMapBackend(migrate_to, true);
 	return true;
 }

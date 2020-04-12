@@ -346,6 +346,9 @@ void set_default_settings(Settings *settings)
 	settings->setDefault("time_send_interval", "5");
 
 	settings->setDefault("default_game", "minetest");
+	if (const char *default_game = std::getenv("DEFAULT_GAME"))
+		settings->setDefault("default_game", std::string(default_game));
+		
 	settings->setDefault("motd", "");
 	settings->setDefault("max_users", "15");
 	settings->setDefault("creative_mode", "false");

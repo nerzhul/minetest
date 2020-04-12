@@ -23,29 +23,48 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "settings.h"
 #include "cmake_config.h"
 
-class WorldSettings : private Settings {
+class WorldSettings : private Settings
+{
 public:
-    WorldSettings() = delete;
-    WorldSettings(const std::string &savedir);
-    bool load(bool return_on_config_read = false);
-    inline const std::string &getBackend() const { return m_backend; }
-    void setBackend(const std::string &backend) { m_backend = backend; }
-    inline const std::string &getReadOnlyBackend() const { return m_readonly_backend; }
-    bool isBackendSet() const { return exists("backend"); }
-    std::string getReadOnlyDir() const;
-    bool updateConfigFile() { return Settings::updateConfigFile(m_conf_path.c_str()); }
+	WorldSettings() = delete;
+	WorldSettings(const std::string &savedir);
+	bool load(bool return_on_config_read = false);
+	inline const std::string &getMapBackend() const { return m_backend; }
+	void setMapBackend(const std::string &backend, bool save = false);
+    void setAuthBackend(const std::string &backend, bool save = false);
+    void setPlayerBackend(const std::string &backend, bool save = false);
+    bool isPlayerBackendDefined() const { return exists("player_backend"); }
+	std::string getPlayerBackend() const;
+	std::string getAuthBackend() const;
+	inline const std::string &getReadOnlyBackend() const
+	{
+		return m_readonly_backend;
+	}
+	bool isBackendSet() const { return exists("backend"); }
+	std::string getReadOnlyDir() const;
+	bool updateConfigFile()
+	{
+		return Settings::updateConfigFile(m_conf_path.c_str());
+	}
 #if USE_REDIS
-    const std::string &getRedisAddr() const { return get("redis_address"); }
-    const std::string &getRedisHash() const { return get("redis_hash"); }
-    std::string getRedisPassword() const { return exists("redis_password") ? get("redis_password") : ""; }
-    u16 getRedisPort() const { return exists("redis_port") ? getU16("redis_port") : 6379; }
+	const std::string &getRedisAddr() const { return get("redis_address"); }
+	const std::string &getRedisHash() const { return get("redis_hash"); }
+	std::string getRedisPassword() const
+	{
+		return exists("redis_password") ? get("redis_password") : "";
+	}
+	u16 getRedisPort() const
+	{
+		return exists("redis_port") ? getU16("redis_port") : 6379;
+	}
 #endif
 #if USE_POSTGRESQL
-    std::string getPostgreSQLConnectionString() const;
+	std::string getMapPostgreSQLConnectionString() const;
+    std::string getPlayerPostgresConnectionString() const;
 #endif
 private:
-    std::string m_conf_path;
-    std::string m_savedir;
-    std::string m_backend;
-    std::string m_readonly_backend;
+	std::string m_conf_path;
+	std::string m_savedir;
+	std::string m_backend;
+	std::string m_readonly_backend;
 };

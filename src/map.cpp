@@ -1204,7 +1204,7 @@ ServerMap::ServerMap(const std::string &savedir, IGameDef *gamedef,
 	// Determine which database backend to use
 	WorldSettings conf(savedir);
 	conf.load();
-	dbase = createDatabase(conf.getBackend(), savedir, conf);
+	dbase = createDatabase(conf.getMapBackend(), savedir, conf);
 	const std::string &ro_backend = conf.getReadOnlyBackend();
 	if (!ro_backend.empty()) {
 		dbase_ro = createDatabase(ro_backend, conf.getReadOnlyDir(), conf);
@@ -1873,7 +1873,7 @@ MapDatabase *ServerMap::createDatabase(
 	#endif
 	#if USE_POSTGRESQL
 	if (name == "postgresql") {
-		return new MapDatabasePostgreSQL(conf.getPostgreSQLConnectionString());
+		return new MapDatabasePostgreSQL(conf.getMapPostgreSQLConnectionString());
 	}
 	#endif
 
