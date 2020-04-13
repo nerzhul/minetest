@@ -37,6 +37,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #if USE_POSTGRESQL
 #define PGSQL_CONN_KEY "pgsql_connection"
 #define PGSQL_PLAYER_CONN_KEY "pgsql_player_connection"
+#define PGSQL_AUTH_CONN_KEY "pgsql_auth_connection"
 #endif
 
 WorldSettings::WorldSettings(const std::string &savedir) :
@@ -103,6 +104,9 @@ bool WorldSettings::load(bool return_on_config_read)
 
     if (const char *pgsql_conn_str = std::getenv("WORLD_PLAYER_POSTGRESQL_CONNECTION"))
 		set(PGSQL_PLAYER_CONN_KEY, std::string(pgsql_conn_str));
+
+	if (const char *pgsql_conn_str = std::getenv("WORLD_AUTH_POSTGRESQL_CONNECTION"))
+		set(PGSQL_AUTH_CONN_KEY, std::string(pgsql_conn_str));
 #endif
 
 	if (return_on_config_read) {
@@ -187,6 +191,13 @@ std::string WorldSettings::getPlayerPostgresConnectionString() const
 {
     std::string connection_string;
 	getNoEx(PGSQL_PLAYER_CONN_KEY, connection_string);
+	return connection_string;
+}
+
+std::string WorldSettings::getAuthPostgresqlConnectionString() const
+{
+	std::string connection_string;
+	getNoEx(PGSQL_AUTH_CONN_KEY, connection_string);
 	return connection_string;
 }
 #endif

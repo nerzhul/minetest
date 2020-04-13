@@ -132,7 +132,8 @@ We currently support the following _world.mt_ overwrite variables:
 - WORLD_PLAYER_BACKEND: player backend (default: `sqlite3`).
 - WORLD_READONLY_BACKEND: readonly_backend flag.
 - WORLD_POSTGRESQL_CONNECTION: PostgreSQL connection string (applied on `postgresql` backend).
-- WORLD_PLAYER_POSTGRESQL_CONNECTION: PostgreSQL player DB connection string (applied on `postgresql`) auth backend.
+- WORLD_AUTH_POSTGRESQL_CONNECTION: PostgreSQL auth DB connection string (applied on `postgresql` auth backend).
+- WORLD_PLAYER_POSTGRESQL_CONNECTION: PostgreSQL player DB connection string (applied on `postgresql` player backend).
 - WORLD_REDIS_ADDRESS: Redis address (applied on `redis` backend).
 - WORLD_REDIS_HASH: Redis hash (applied on `redis` backend).
 - WORLD_REDIS_PASSWORD: Redis password (if any, applied on `redis` backend).

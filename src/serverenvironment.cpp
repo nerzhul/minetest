@@ -2152,11 +2152,8 @@ AuthDatabase *ServerEnvironment::openAuthDatabase(
 		return new AuthDatabaseSQLite3(savedir);
 
 #if USE_POSTGRESQL
-	if (name == "postgresql") {
-		std::string connect_string;
-		conf.getNoEx("pgsql_auth_connection", connect_string);
-		return new AuthDatabasePostgreSQL(connect_string);
-	}
+	if (name == "postgresql")
+		return new AuthDatabasePostgreSQL(conf.getAuthPostgresqlConnectionString());
 #endif
 
 	if (name == "files")

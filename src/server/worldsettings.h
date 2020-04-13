@@ -61,6 +61,7 @@ public:
 #if USE_POSTGRESQL
 	std::string getMapPostgreSQLConnectionString() const;
     std::string getPlayerPostgresConnectionString() const;
+	std::string getAuthPostgresqlConnectionString() const;
 #endif
 private:
 	std::string m_conf_path;
