@@ -22,11 +22,15 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "server/mods.h"
 #include "settings.h"
 #include "test_config.h"
+#include "util/metricsbackend.h"
 
 class TestServerModManager : public TestBase
 {
 public:
-	TestServerModManager() { TestManager::registerTestModule(this); }
+	TestServerModManager() : m_test_metrics_backend(new MetricsBackend())
+	{
+		TestManager::registerTestModule(this);
+	}
 	const char *getName() { return "TestServerModManager"; }
 
 	void runTests(IGameDef *gamedef);
@@ -41,6 +45,9 @@ public:
 	void testGetModNames();
 	void testGetModMediaPathsWrongDir();
 	void testGetModMediaPaths();
+
+private:
+	std::unique_ptr<MetricsBackend> m_test_metrics_backend;
 };
 
 static TestServerModManager g_test_instance;
@@ -90,31 +97,32 @@ void TestServerModManager::testCreation()
 	Settings world_config;
 	world_config.set("gameid", "minimal");
 	UASSERTEQ(bool, world_config.updateConfigFile(path.c_str()), true);
-	ServerModManager sm(TEST_WORLDDIR);
+	ServerModManager sm(TEST_WORLDDIR, m_test_metrics_backend.get());
 }
 
 void TestServerModManager::testGetModsWrongDir()
 {
 	// Test in non worlddir to ensure no mods are found
-	ServerModManager sm(std::string(TEST_WORLDDIR) + DIR_DELIM + "..");
+	ServerModManager sm(std::string(TEST_WORLDDIR) + DIR_DELIM + "..",
+			m_test_metrics_backend.get());
 	UASSERTEQ(bool, sm.getMods().empty(), true);
 }
 
 void TestServerModManager::testUnsatisfiedMods()
 {
-	ServerModManager sm(std::string(TEST_WORLDDIR));
+	ServerModManager sm(std::string(TEST_WORLDDIR), m_test_metrics_backend.get());
 	UASSERTEQ(bool, sm.getUnsatisfiedMods().empty(), true);
 }
 
 void TestServerModManager::testIsConsistent()
 {
-	ServerModManager sm(std::string(TEST_WORLDDIR));
+	ServerModManager sm(std::string(TEST_WORLDDIR), m_test_metrics_backend.get());
 	UASSERTEQ(bool, sm.isConsistent(), true);
 }
 
 void TestServerModManager::testGetMods()
 {
-	ServerModManager sm(std::string(TEST_WORLDDIR));
+	ServerModManager sm(std::string(TEST_WORLDDIR), m_test_metrics_backend.get());
 	const auto &mods = sm.getMods();
 	UASSERTEQ(bool, mods.empty(), false);
 
@@ -133,14 +141,15 @@ void TestServerModManager::testGetMods()
 
 void TestServerModManager::testGetModspec()
 {
-	ServerModManager sm(std::string(TEST_WORLDDIR));
+	ServerModManager sm(std::string(TEST_WORLDDIR), m_test_metrics_backend.get());
 	UASSERTEQ(const ModSpec *, sm.getModSpec("wrongmod"), NULL);
 	UASSERT(sm.getModSpec("default") != NULL);
 }
 
 void TestServerModManager::testGetModNamesWrongDir()
 {
-	ServerModManager sm(std::string(TEST_WORLDDIR) + DIR_DELIM + "..");
+	ServerModManager sm(std::string(TEST_WORLDDIR) + DIR_DELIM + "..",
+			m_test_metrics_backend.get());
 	std::vector<std::string> result;
 	sm.getModNames(result);
 	UASSERTEQ(bool, result.empty(), true);
@@ -148,7 +157,7 @@ void TestServerModManager::testGetModNamesWrongDir()
 
 void TestServerModManager::testGetModNames()
 {
-	ServerModManager sm(std::string(TEST_WORLDDIR));
+	ServerModManager sm(std::string(TEST_WORLDDIR), m_test_metrics_backend.get());
 	std::vector<std::string> result;
 	sm.getModNames(result);
 	UASSERTEQ(bool, result.empty(), false);
@@ -157,7 +166,8 @@ void TestServerModManager::testGetModNames()
 
 void TestServerModManager::testGetModMediaPathsWrongDir()
 {
-	ServerModManager sm(std::string(TEST_WORLDDIR) + DIR_DELIM + "..");
+	ServerModManager sm(std::string(TEST_WORLDDIR) + DIR_DELIM + "..",
+			m_test_metrics_backend.get());
 	std::vector<std::string> result;
 	sm.getModsMediaPaths(result);
 	UASSERTEQ(bool, result.empty(), true);
@@ -165,7 +175,7 @@ void TestServerModManager::testGetModMediaPathsWrongDir()
 
 void TestServerModManager::testGetModMediaPaths()
 {
-	ServerModManager sm(std::string(TEST_WORLDDIR));
+	ServerModManager sm(std::string(TEST_WORLDDIR), m_test_metrics_backend.get());
 	std::vector<std::string> result;
 	sm.getModsMediaPaths(result);
 	UASSERTEQ(bool, result.empty(), false);

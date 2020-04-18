@@ -20,7 +20,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #pragma once
 
 #include "content/mods.h"
+#include <memory>
 
+class MetricsBackend;
+class MetricCounter;
 class ServerScripting;
 
 /**
@@ -35,9 +38,12 @@ public:
 	 * Creates a ServerModManager which targets worldpath
 	 * @param worldpath
 	 */
-	ServerModManager(const std::string &worldpath);
+	ServerModManager(const std::string &worldpath, MetricsBackend *mb);
 	void loadMods(ServerScripting *script);
 	const ModSpec *getModSpec(const std::string &modname) const;
 	void getModNames(std::vector<std::string> &modlist) const;
 	void getModsMediaPaths(std::vector<std::string> &paths) const;
+
+private:
+	std::shared_ptr<MetricCounter> m_mod_counter;
 };

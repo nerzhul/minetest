@@ -241,6 +241,22 @@ Server::Server(
 
 	if (!gamespec.isValid())
 		throw ServerError("Supplied invalid gamespec");
+
+#if USE_PROMETHEUS
+	m_metrics_backend = std::unique_ptr<MetricsBackend>(new PrometheusMetricsBackend());
+#else
+	m_metrics_backend = std::unique_ptr<MetricsBackend>(new MetricsBackend());
+#endif
+
+	m_uptime_gauge = m_metrics_backend->addGauge("core_server_uptime", "Server uptime (in seconds)");
+	m_player_gauge = m_metrics_backend->addGauge("core_player_number", "Number of connected players");
+	m_step_counter = m_metrics_backend->addCounter("core_server_step_time", "Server step time (in milliseconds)");
+
+	m_timeofday_gauge = m_metrics_backend->addGauge("core_timeofday", "Time of day value");
+	m_lag_gauge = m_metrics_backend->addGauge("core_lag", "Lag value (in seconds)");
+	m_aom_buffer_counter = m_metrics_backend->addCounter("core_aom_buffer_count", "Active Object Message buffer queue size");
+	m_packet_recv_counter = m_metrics_backend->addCounter("core_server_packet_recv", "Processable packets received");
+	m_packet_recv_processed_counter = m_metrics_backend->addCounter("core_server_packet_recv_processed", "Valid received packets processed");
 }
 
 Server::~Server()
@@ -342,7 +358,7 @@ void Server::init()
 	std::string ban_path = m_path_world + DIR_DELIM "ipban.txt";
 	m_banmanager = new BanManager(ban_path);
 
-	m_modmgr = std::unique_ptr<ServerModManager>(new ServerModManager(m_path_world));
+	m_modmgr = std::unique_ptr<ServerModManager>(new ServerModManager(m_path_world, m_metrics_backend.get()));
 	std::vector<ModSpec> unsatisfied_mods = m_modmgr->getUnsatisfiedMods();
 	// complain about mods with unsatisfied dependencies
 	if (!m_modmgr->isConsistent()) {
@@ -353,7 +369,7 @@ void Server::init()
 	MutexAutoLock envlock(m_env_mutex);
 
 	// Create the Map (loads map_meta.txt, overriding configured mapgen params)
-	ServerMap *servermap = new ServerMap(m_path_world, this, m_emerge);
+	ServerMap *servermap = new ServerMap(m_path_world, this, m_emerge, m_metrics_backend.get());
 
 	// Initialize scripting
 	infostream << "Server: Initializing Lua" << std::endl;
@@ -513,6 +529,8 @@ void Server::AsyncRunStep(bool initial_step)
 	*/
 	{
 		m_uptime.set(m_uptime.get() + dtime);
+		m_uptime_gauge->set(m_uptime.get());
+		m_step_counter->increment(dtime * 1000);
 	}
 
 	handlePeerChanges();
@@ -527,11 +545,13 @@ void Server::AsyncRunStep(bool initial_step)
 	*/
 
 	m_time_of_day_send_timer -= dtime;
-	if(m_time_of_day_send_timer < 0.0) {
+	if (m_time_of_day_send_timer < 0.0) {
 		m_time_of_day_send_timer = g_settings->getFloat("time_send_interval");
 		u16 time = m_env->getTimeOfDay();
 		float time_speed = g_settings->getFloat("time_speed");
 		SendTimeOfDay(PEER_ID_INEXISTENT, time, time_speed);
+
+		m_timeofday_gauge->set(time);
 	}
 
 	{
@@ -604,6 +624,7 @@ void Server::AsyncRunStep(bool initial_step)
 	m_clients.step(dtime);
 
 	m_lag += (m_lag > dtime ? -1 : 1) * dtime/100;
+	m_lag_gauge->set(m_lag);
 #if USE_CURL
 	// send masterserver announce
 	{
@@ -638,6 +659,7 @@ void Server::AsyncRunStep(bool initial_step)
 		const RemoteClientMap &clients = m_clients.getClientList();
 		ScopeProfiler sp(g_profiler, "Server: update objects within range");
 
+		m_player_gauge->set(clients.size());
 		for (const auto &client_it : clients) {
 			RemoteClient *client = client_it.second;
 
@@ -702,6 +724,8 @@ void Server::AsyncRunStep(bool initial_step)
 			}
 			message_list->push_back(aom);
 		}
+
+		m_aom_buffer_counter->increment(buffered_messages.size());
 
 		m_clients.lock();
 		const RemoteClientMap &clients = m_clients.getClientList();
@@ -943,7 +967,9 @@ void Server::Receive()
 			}
 
 			peer_id = pkt.getPeerId();
+			m_packet_recv_counter->increment();
 			ProcessData(&pkt);
+			m_packet_recv_processed_counter->increment();
 		} catch (const con::InvalidIncomingDataException &e) {
 			infostream << "Server::Receive(): InvalidIncomingDataException: what()="
 					<< e.what() << std::endl;

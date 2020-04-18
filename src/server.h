@@ -33,6 +33,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "util/numeric.h"
 #include "util/thread.h"
 #include "util/basic_macros.h"
+#include "util/metricsbackend.h"
 #include "serverenvironment.h"
 #include "clientiface.h"
 #include "chatmessage.h"
@@ -677,6 +678,19 @@ private:
 
 	// ModChannel manager
 	std::unique_ptr<ModChannelMgr> m_modchannel_mgr;
+
+	// Global server metrics backend
+	std::unique_ptr<MetricsBackend> m_metrics_backend;
+
+	// Server metrics
+	MetricGaugePtr m_uptime_gauge;
+	MetricCounterPtr m_step_counter;
+	MetricGaugePtr m_player_gauge;
+	MetricGaugePtr m_timeofday_gauge;
+	MetricGaugePtr m_lag_gauge;
+	MetricCounterPtr m_aom_buffer_counter;
+	MetricCounterPtr m_packet_recv_counter;
+	MetricCounterPtr m_packet_recv_processed_counter;
 };
 
 /*

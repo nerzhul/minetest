@@ -23,6 +23,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "scripting_server.h"
 #include "content/subgames.h"
 #include "porting.h"
+#include "util/metricsbackend.h"
 
 /**
  * Manage server mods
@@ -34,7 +35,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
  * Creates a ServerModManager which targets worldpath
  * @param worldpath
  */
-ServerModManager::ServerModManager(const std::string &worldpath) :
+ServerModManager::ServerModManager(const std::string &worldpath, MetricsBackend *mb) :
 		ModConfiguration(worldpath)
 {
 	SubgameSpec gamespec = findWorldSubgame(worldpath);
@@ -46,6 +47,8 @@ ServerModManager::ServerModManager(const std::string &worldpath) :
 	// Load normal mods
 	std::string worldmt = worldpath + DIR_DELIM + "world.mt";
 	addModsFromConfig(worldmt, gamespec.addon_mods_paths);
+
+	m_mod_counter = mb->addCounter("core_loaded_mods", "Number of loaded mods");
 }
 
 // clang-format off
@@ -71,6 +74,7 @@ void ServerModManager::loadMods(ServerScripting *script)
 		script->loadMod(script_path, mod.name);
 		infostream << "Mod \"" << mod.name << "\" loaded after "
 			<< (porting::getTimeMs() - t) << " ms" << std::endl;
+		m_mod_counter->increment();
 	}
 
 	// Run a callback when mods are loaded
