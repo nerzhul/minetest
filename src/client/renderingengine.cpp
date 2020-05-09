@@ -41,10 +41,15 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 		!defined(SERVER) && !defined(__HAIKU__)
 #define XORG_USED
 #endif
+
 #ifdef XORG_USED
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
+#endif
+
+#ifdef USE_WAYLAND
+#include "window_wayland.h"
 #endif
 
 #ifdef _WIN32
@@ -57,7 +62,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #endif
 
 RenderingEngine *RenderingEngine::s_singleton = nullptr;
-
 
 static gui::GUISkin *createSkin(gui::IGUIEnvironment *environment,
 		gui::EGUI_SKIN_TYPE type, video::IVideoDriver *driver)
@@ -148,6 +152,8 @@ RenderingEngine::RenderingEngine(IEventReceiver *receiver)
 			gui::EGST_WINDOWS_METALLIC, driver);
 	m_device->getGUIEnvironment()->setSkin(skin);
 	skin->drop();
+
+	WaylandWindow().run();
 }
 
 RenderingEngine::~RenderingEngine()

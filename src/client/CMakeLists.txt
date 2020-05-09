@@ -14,8 +14,17 @@ if(USE_SOUND)
 		PARENT_SCOPE)
 endif()
 
+
+if(USE_WAYLAND)
+	set(wayland_SRCS
+		${CMAKE_CURRENT_SOURCE_DIR}/window_wayland.cpp
+	)
+endif(USE_WAYLAND)
+
+
 set(client_SRCS
 	${sound_SRCS}
+	${wayland_SRCS}
 	${CMAKE_CURRENT_SOURCE_DIR}/meshgen/collector.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/render/anaglyph.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/render/core.cpp
