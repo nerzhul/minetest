@@ -133,13 +133,3 @@ bool StaticObjectList::moveActiveToStored(u16 id)
 	return true;
 }
 
-StaticObject* StaticObjectList::getActive(u16 id)
-{
-	const auto n = m_active.find(id);
-	if (n != m_active.end()) {
-		return &n->second;
-	}
-
-	return nullptr;
-}
-

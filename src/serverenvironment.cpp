@@ -1250,13 +1250,10 @@ void ServerEnvironment::clearObjects(ClearObjectsMode mode)
 				<< "Failed to emerge block " << PP(p) << std::endl;
 			continue;
 		}
-		u32 num_stored = block->m_static_objects.getStoredSize();
-		u32 num_active = block->m_static_objects.getActiveSize();
-		if (num_stored != 0 || num_active != 0) {
-			block->m_static_objects.clearStored();
-			block->m_static_objects.clearActives();
-			block->raiseModified(MOD_STATE_WRITE_NEEDED, MOD_REASON_CLEAR_ALL_OBJECTS);
-			num_objs_cleared += num_stored + num_active;
+
+		u32 num_cleared = block->clearObjects();
+		if (num_cleared > 0) {
+			num_objs_cleared += num_cleared;
 			num_blocks_cleared++;
 		}
 		num_blocks_checked++;

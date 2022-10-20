@@ -592,6 +592,19 @@ bool MapBlock::moveActiveObjectToStored(u16 id)
 	return false;
 }
 
+u32 MapBlock::clearObjects()
+{
+	u32 num_stored = m_static_objects.getStoredSize();
+	u32 num_active = m_static_objects.getActiveSize();
+	if (num_stored != 0 || num_active != 0) {
+		m_static_objects.clearStored();
+		m_static_objects.clearActives();
+		raiseModified(MOD_STATE_WRITE_NEEDED, MOD_REASON_CLEAR_ALL_OBJECTS);
+		return num_stored + num_active;
+	}
+
+	return 0;
+}
 /*
 	Legacy serialization
 */

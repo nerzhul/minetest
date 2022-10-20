@@ -87,8 +87,6 @@ public:
 	inline void clearStored() { m_stored.clear(); }
 	inline bool isStoredEmpty() const { return m_stored.empty(); }
 	void pushStored(const StaticObject &obj) { m_stored.push_back(obj); }
-	// Return null if object is not found
-	StaticObject *getActive(u16 id);
 
 	bool moveActiveToStored(u16 id);
 
