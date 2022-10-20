@@ -1870,8 +1870,8 @@ void Server::SendSetLighting(session_t peer_id, const Lighting &lighting)
 {
 	NetworkPacket pkt(TOCLIENT_SET_LIGHTING,
 			4, peer_id);
-	
-	pkt << lighting.shadow_intensity;
+
+	pkt << lighting.getShadowIntensity();
 
 	Send(&pkt);
 }

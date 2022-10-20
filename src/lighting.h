@@ -21,7 +21,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 /** Describes ambient light settings for a player
  */
-struct Lighting
+class Lighting
 {
-    float shadow_intensity {0.0f};
+public:
+	void setShadowIntensity(float i) { shadow_intensity = i; }
+	float getShadowIntensity() const { return shadow_intensity; }
+
+private:
+	float shadow_intensity{0.0f};
 };

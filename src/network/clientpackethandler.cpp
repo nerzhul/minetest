@@ -1760,8 +1760,9 @@ void Client::handleCommand_MinimapModes(NetworkPacket *pkt)
 
 void Client::handleCommand_SetLighting(NetworkPacket *pkt)
 {
-	Lighting& lighting = m_env.getLocalPlayer()->getLighting();
-
-	if (pkt->getRemainingBytes() >= 4)
-		*pkt >> lighting.shadow_intensity;
+	if (pkt->getRemainingBytes() >= 4) {
+		float shadow_intensity;
+		*pkt >> shadow_intensity;
+		m_env.getLocalPlayer()->setShadowIntensity(shadow_intensity);
+	}
 }
