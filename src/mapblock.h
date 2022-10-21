@@ -36,6 +36,7 @@ class Map;
 class NodeMetadataList;
 class IGameDef;
 class MapBlockMesh;
+class ServerScripting;
 class VoxelManipulator;
 
 #define BLOCK_TIMESTAMP_UNDEFINED 0xffffffff
@@ -432,6 +433,7 @@ public:
 	bool moveActiveObjectToStored(u16 id);
 	// clearObject and return removed objects count
 	u32 clearObjects();
+
 private:
 	/*
 		Private methods
@@ -449,7 +451,6 @@ public:
 #endif
 
 	NodeMetadataList m_node_metadata;
-	NodeTimerList m_node_timers;
 	StaticObjectList m_static_objects;
 
 	static const u32 ystride = MAP_BLOCKSIZE;
@@ -540,6 +541,7 @@ private:
 	int m_refcount = 0;
 
 	MapNode data[nodecount];
+	NodeTimerList m_node_timers;
 };
 
 typedef std::vector<MapBlock*> MapBlockVect;
