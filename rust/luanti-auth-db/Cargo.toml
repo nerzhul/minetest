@@ -1,0 +1,30 @@
+[package]
+name = "luanti-auth-db"
+version = "0.1.0"
+edition = "2021"
+description = "Authentication database support for Luanti (Minetest) - SQLite3 and PostgreSQL"
+license = "LGPL-2.1-or-later"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+# SQLite support
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
+# PostgreSQL support
+tokio-postgres = { version = "0.7", optional = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+default = ["sqlite", "postgres"]
+sqlite = ["rusqlite"]
+postgres = ["tokio-postgres", "tokio"]
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[lib]
+name = "luanti_auth_db"
+path = "src/lib.rs"

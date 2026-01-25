@@ -1,0 +1,18 @@
+[package]
+name = "luanti-network"
+version = "0.1.0"
+edition = "2021"
+description = "Network protocol implementation for Luanti (Minetest)"
+license = "LGPL-2.1-or-later"
+
+[dependencies]
+tokio = { workspace = true }
+bytes = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+luanti-auth-db = { path = "../luanti-auth-db" }
+
+[lib]
+name = "luanti_network"
+path = "src/lib.rs"

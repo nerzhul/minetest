@@ -1,0 +1,22 @@
+[package]
+name = "luanti-server"
+version = "0.1.0"
+edition = "2021"
+description = "Luanti (Minetest) server implementation in Rust"
+license = "LGPL-2.1-or-later"
+
+[[bin]]
+name = "luanti-server"
+path = "src/main.rs"
+
+[dependencies]
+luanti-network = { path = "../luanti-network" }
+luanti-auth-db = { path = "../luanti-auth-db", features = ["sqlite"] }
+tokio = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }
+
+[profile.release]
+opt-level = 3
+lto = true
