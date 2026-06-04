@@ -7,10 +7,34 @@ use std::net::SocketAddr;
 
 use luanti_auth_db::AuthDatabase;
 use luanti_network::{
-    create_access_denied, create_auth_accept_response, create_chat_message_response,
-    create_hello_response, AccessDeniedCode, AuthMechanism, Session, ToServerCommand,
-    ToServerConnectionState,
+    auth as auth_helpers,
+    base64_util as base64,
+    create_access_denied, create_announce_media, create_auth_accept_response,
+    create_chat_message_response, create_csm_restriction_flags, create_hello_response,
+    create_itemdef_response, create_media_bunch, create_movement, create_nodedef_response,
+    create_srp_bytes_s_b_response, create_time_of_day,
+    srp as srp_helpers,
+    wire::WireReader,
+    AccessDeniedCode, AuthMechanism, MediaAnnounceEntry, MediaBunchFile, Session, SrpVerifier,
+    ToServerCommand, ToServerConnectionState,
 };
+
+/// Highest serialization version the server can write.
+///
+/// Corresponds to C++ `SER_FMT_VER_HIGHEST_WRITE`.
+const SER_FMT_VER_HIGHEST_WRITE: u8 = 29;
+
+/// Default map seed reported in `TOCLIENT_AUTH_ACCEPT`.
+const DEFAULT_MAP_SEED: u64 = 12345;
+
+/// Recommended send interval reported in `TOCLIENT_AUTH_ACCEPT` (seconds).
+const DEFAULT_SEND_INTERVAL: f32 = 0.1;
+
+/// Default time of day (0 = midnight).
+const DEFAULT_TIME_OF_DAY: u16 = 6000; // ~ 6am
+
+/// Default day/night speed.
+const DEFAULT_TIME_SPEED: f32 = 1.0;
 
 /// Represents a parsed network packet with command information
 #[derive(Debug)]
@@ -43,14 +67,21 @@ impl CommandPacket {
     }
 }
 
+/// State stored per-peer between the SRP `_A` and `_M` packets.
+pub struct PendingSrp {
+    #[allow(dead_code)]
+    pub verifier: SrpVerifier,
+    #[allow(dead_code)]
+    pub salt: Vec<u8>,
+}
+
 /// Command handler that processes application-level protocol commands
 pub struct CommandHandler {
-    // Protocol version negotiation
     pub min_protocol_version: u16,
     pub max_protocol_version: u16,
 
-    // Authentication database
     auth_db: Box<dyn AuthDatabase>,
+    pending_srp: std::collections::HashMap<u16, PendingSrp>,
 }
 
 impl CommandHandler {
@@ -63,38 +94,51 @@ impl CommandHandler {
             min_protocol_version,
             max_protocol_version,
             auth_db,
+            pending_srp: std::collections::HashMap::new(),
         }
     }
 
-    /// Process a command packet from a client
+    /// Process a command packet from a client.
+    ///
+    /// Returns a vector of response packets to send back to the client
+    /// (zero, one, or several). The session state machine and the
+    /// protocol-level wrapping are the caller's responsibility.
     pub fn handle_command(
         &mut self,
         session: &mut Session,
         packet: &CommandPacket,
         peer_addr: SocketAddr,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Vec<Vec<u8>>> {
         if let Some(cmd) = packet.as_to_server_command() {
             debug!("Processing command {} from {}", cmd, peer_addr);
 
             // Check if session state allows this command
             if !self.check_command_state(session, cmd) {
                 warn!(
-                    "Command {} not allowed in current state from {}",
-                    cmd, peer_addr
+                    "Command {} not allowed in current state {:?} from {}",
+                    cmd, session.connection_state, peer_addr
                 );
-                return Ok(None);
+                return Ok(vec![]);
             }
 
             // Dispatch to appropriate handler
             match cmd {
                 ToServerCommand::Init => self.handle_init(session, packet, peer_addr),
+                ToServerCommand::FirstSrp => self.handle_first_srp(session, packet, peer_addr),
+                ToServerCommand::SrpBytesA => self.handle_srp_bytes_a(session, packet, peer_addr),
+                ToServerCommand::SrpBytesM => self.handle_srp_bytes_m(session, packet, peer_addr),
                 ToServerCommand::Init2 => self.handle_init2(session, packet, peer_addr),
+                ToServerCommand::RequestMedia => {
+                    self.handle_request_media(session, packet, peer_addr)
+                }
+                ToServerCommand::HaveMedia => self.handle_have_media(session, packet, peer_addr),
+                ToServerCommand::GotBlocks => self.handle_got_blocks(session, packet),
                 ToServerCommand::PlayerPos => self.handle_player_pos(session, packet),
                 ToServerCommand::ChatMessage => self.handle_chat_message(session, packet),
                 ToServerCommand::ClientReady => self.handle_client_ready(session, packet),
                 _ => {
                     info!("Handler not implemented for {}", cmd);
-                    Ok(None)
+                    Ok(vec![])
                 }
             }
         } else {
@@ -102,30 +146,32 @@ impl CommandHandler {
                 "Unknown command 0x{:04x} from {}",
                 packet.command, peer_addr
             );
-            Ok(None)
+            Ok(vec![])
         }
     }
 
-    /// Check if command is allowed in current session state
+    /// Check if command is allowed in current session state.
     fn check_command_state(&self, session: &Session, cmd: ToServerCommand) -> bool {
-        let required_state = cmd.required_state();
-        let current_state = &session.connection_state;
-
-        match required_state {
-            ToServerConnectionState::NotConnected => {
-                matches!(current_state, ToServerConnectionState::NotConnected)
-            }
-            ToServerConnectionState::Startup => {
-                matches!(
-                    current_state,
-                    ToServerConnectionState::Startup | ToServerConnectionState::NotConnected
-                )
-            }
-            ToServerConnectionState::Ingame => {
-                matches!(current_state, ToServerConnectionState::Ingame)
-            }
+        // Special case: media-loading commands are only allowed after
+        // TOSERVER_INIT2 has been received.
+        if matches!(
+            cmd,
+            ToServerCommand::RequestMedia
+                | ToServerCommand::HaveMedia
+                | ToServerCommand::GotBlocks
+                | ToServerCommand::ClientReady
+        ) {
+            return std::mem::discriminant(&cmd.required_state())
+                == std::mem::discriminant(&session.connection_state)
+                && session.media_loading;
         }
+        std::mem::discriminant(&cmd.required_state())
+            == std::mem::discriminant(&session.connection_state)
     }
+
+    // ------------------------------------------------------------------
+    // Handlers
+    // ------------------------------------------------------------------
 
     /// Handle TOSERVER_INIT command
     fn handle_init(
@@ -133,100 +179,501 @@ impl CommandHandler {
         session: &mut Session,
         packet: &CommandPacket,
         peer_addr: SocketAddr,
-    ) -> Result<Option<Vec<u8>>> {
-        if packet.data.len() < 7 {
-            return Err(anyhow!("INIT packet too short"));
-        }
+    ) -> Result<Vec<Vec<u8>>> {
+        // TOSERVER_INIT:
+        //   u8  serialization_version (= SER_FMT_VER_HIGHEST_READ)
+        //   u16 unused (supported network compression modes)
+        //   u16 min_net_proto_version
+        //   u16 max_net_proto_version
+        //   std::string player name
+        let mut r = WireReader::new(&packet.data);
 
-        let client_ser_ver = packet.data[0];
-        let _compression = u16::from_be_bytes([packet.data[1], packet.data[2]]);
-        let min_proto = u16::from_be_bytes([packet.data[3], packet.data[4]]);
-        let max_proto = u16::from_be_bytes([packet.data[5], packet.data[6]]);
-
-        // Parse player name (length-prefixed string)
-        let mut offset = 7;
-        if packet.data.len() < offset + 2 {
-            return Err(anyhow!("INIT packet missing player name length"));
-        }
-
-        let name_len = u16::from_be_bytes([packet.data[offset], packet.data[offset + 1]]) as usize;
-        offset += 2;
-
-        if packet.data.len() < offset + name_len {
-            return Err(anyhow!("INIT packet name too short"));
-        }
-
-        let player_name =
-            String::from_utf8_lossy(&packet.data[offset..offset + name_len]).to_string();
+        let client_ser_ver = r.read_u8()?;
+        let _compression = r.read_u16()?;
+        let min_proto = r.read_u16()?;
+        let max_proto = r.read_u16()?;
+        let player_name = r.read_utf8()?;
 
         info!(
             "Client {} INIT: ser_ver={}, proto={}-{}, name='{}'",
             peer_addr, client_ser_ver, min_proto, max_proto, player_name
         );
 
-        // Negotiate serialization version (use minimum of client and server)
-        const SER_FMT_VER_HIGHEST_WRITE: u8 = 29;
-        let negotiated_ser_ver = std::cmp::min(client_ser_ver, SER_FMT_VER_HIGHEST_WRITE);
+        if !auth_helpers::is_valid_player_name(&player_name) {
+            warn!(
+                "Player with invalid name '{}' tried to connect from {}",
+                player_name, peer_addr
+            );
+            return Ok(vec![create_access_denied(
+                AccessDeniedCode::WrongCharsInName,
+                "Invalid characters in player name",
+            )]);
+        }
 
-        // Negotiate protocol version
+        let negotiated_ser_ver = std::cmp::min(client_ser_ver, SER_FMT_VER_HIGHEST_WRITE);
         let negotiated_proto = std::cmp::min(max_proto, self.max_protocol_version);
         if negotiated_proto < self.min_protocol_version || negotiated_proto < min_proto {
             warn!("Protocol version mismatch with {}", peer_addr);
-            return Ok(Some(create_access_denied(
+            return Ok(vec![create_access_denied(
                 AccessDeniedCode::WrongVersion,
                 "Protocol version mismatch",
-            )));
+            )]);
         }
 
-        // Determine authentication mechanism based on database lookup
-        let auth_mechs = self.determine_auth_mechanism(&player_name)?;
-
+        let (auth_mechs, enc_pwd) = self.determine_auth_mechanism(&player_name)?;
         debug!("Auth mechanisms for {}: 0x{:08x}", player_name, auth_mechs);
 
         session.protocol_version = Some(negotiated_proto);
         session.player_name = Some(player_name);
+        session.enc_pwd = enc_pwd;
+        session.allowed_auth_mechs = auth_mechs;
+        session.chosen_mech = AuthMechanism::None as u32;
+        session.create_player_on_auth_success = false;
+        session.media_loading = false;
+        session.client_ready = false;
         session.connection_state = ToServerConnectionState::Startup;
 
         debug!(
             "Negotiated with {}: ser_ver={}, proto={}",
             peer_addr, negotiated_ser_ver, negotiated_proto
         );
-        // Send TOCLIENT_HELLO
-        Ok(Some(create_hello_response(
+
+        Ok(vec![create_hello_response(
             negotiated_ser_ver,
             negotiated_proto,
             auth_mechs,
-        )))
+        )])
     }
 
-    /// Handle TOSERVER_INIT2 command
+    /// Handle TOSERVER_FIRST_SRP command.
+    ///
+    /// Wire format: `std::string salt | std::string verifier | u8 is_empty`
+    fn handle_first_srp(
+        &mut self,
+        session: &mut Session,
+        packet: &CommandPacket,
+        peer_addr: SocketAddr,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut r = WireReader::new(&packet.data);
+        let salt = r.read_string()?;
+        let verifier = r.read_string()?;
+        let is_empty = r.read_u8()?;
+
+        info!(
+            "FIRST_SRP from {}: is_empty={}, salt_len={}, verifier_len={}",
+            peer_addr,
+            is_empty,
+            salt.len(),
+            verifier.len()
+        );
+
+        let player_name = session
+            .player_name
+            .clone()
+            .ok_or_else(|| anyhow!("FIRST_SRP without player name"))?;
+
+        if is_empty == 1 {
+            return Ok(vec![create_access_denied(
+                AccessDeniedCode::EmptyPassword,
+                "Empty passwords are not allowed",
+            )]);
+        }
+
+        if !session.create_player_on_auth_success
+            && self.auth_db.get_auth(&player_name).is_ok()
+        {
+            return Ok(vec![create_access_denied(
+                AccessDeniedCode::AlreadyConnected,
+                "Player already exists",
+            )]);
+        }
+
+        let enc_pwd = auth_helpers::encode_srp_verifier(&verifier, &salt);
+
+        if session.create_player_on_auth_success {
+            self.auth_db.save_auth(&luanti_auth_db::AuthEntry {
+                id: 0,
+                name: player_name.clone(),
+                password: enc_pwd.clone(),
+                privileges: vec![],
+                last_login: now_secs(),
+            })?;
+            session.create_player_on_auth_success = false;
+        } else {
+            let mut entry = luanti_auth_db::AuthEntry {
+                id: 0,
+                name: player_name.clone(),
+                password: enc_pwd.clone(),
+                privileges: vec![],
+                last_login: now_secs(),
+            };
+            self.auth_db.create_auth(&mut entry)?;
+        }
+
+        session.enc_pwd = Some(enc_pwd);
+        // Stays in Startup, the client must follow up with INIT2 once
+        // it receives AUTH_ACCEPT.
+
+        Ok(vec![create_auth_accept_response(
+            DEFAULT_MAP_SEED,
+            DEFAULT_SEND_INTERVAL,
+            AuthMechanism::FirstSrp as u32,
+        )])
+    }
+
+    /// Handle TOSERVER_SRP_BYTES_A command.
+    ///
+    /// Wire format: `std::string bytes_A | u8 based_on`
+    fn handle_srp_bytes_a(
+        &mut self,
+        session: &mut Session,
+        packet: &CommandPacket,
+        peer_addr: SocketAddr,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut r = WireReader::new(&packet.data);
+        let bytes_a = r.read_string()?;
+        let based_on = r.read_u8()?;
+
+        let chosen = if based_on == 0 {
+            AuthMechanism::LegacyPassword as u32
+        } else {
+            AuthMechanism::Srp as u32
+        };
+
+        if session.allowed_auth_mechs & chosen == 0 {
+            warn!(
+                "Client from {} tried to use disallowed auth mech {}",
+                peer_addr, chosen
+            );
+            return Ok(vec![create_access_denied(
+                AccessDeniedCode::UnexpectedData,
+                "Auth mechanism not allowed",
+            )]);
+        }
+        session.chosen_mech = chosen;
+
+        let enc_pwd = session
+            .enc_pwd
+            .as_ref()
+            .ok_or_else(|| anyhow!("SRP_BYTES_A without stored enc_pwd"))?;
+        let player_name = session
+            .player_name
+            .clone()
+            .ok_or_else(|| anyhow!("SRP_BYTES_A without player name"))?;
+
+        let (verifier, salt) = match based_on {
+            0 => {
+                let lower = player_name.to_lowercase();
+                let (s, v) =
+                    srp_helpers::create_salted_verification_key(&lower, enc_pwd.as_bytes(), None)?;
+                (v, s)
+            }
+            1 => {
+                let mut v = Vec::new();
+                let mut s = Vec::new();
+                if !auth_helpers::decode_srp_verifier_and_salt(enc_pwd, &mut v, &mut s) {
+                    return Ok(vec![create_access_denied(
+                        AccessDeniedCode::ServerFail,
+                        "Invalid stored verifier",
+                    )]);
+                }
+                (v, s)
+            }
+            _ => {
+                return Ok(vec![create_access_denied(
+                    AccessDeniedCode::UnexpectedData,
+                    "Unknown based_on value",
+                )]);
+            }
+        };
+
+        let (verifier_obj, bytes_b) = SrpVerifier::new(
+            &player_name.to_lowercase(),
+            &salt,
+            &verifier,
+            &bytes_a,
+            None,
+        )
+        .map_err(|e| {
+            anyhow!("SRP safety check failed: {} (likely A mod N == 0 or invalid A)", e)
+        })?;
+
+        self.pending_srp.insert(
+            session.peer_id,
+            PendingSrp {
+                verifier: verifier_obj,
+                salt: salt.clone(),
+            },
+        );
+
+        info!(
+            "SRP_BYTES_A from {}: based_on={}, len_A={}, sending B ({} bytes)",
+            peer_addr,
+            based_on,
+            bytes_a.len(),
+            bytes_b.len()
+        );
+
+        Ok(vec![create_srp_bytes_s_b_response(&salt, &bytes_b)])
+    }
+
+    /// Handle TOSERVER_SRP_BYTES_M command.
+    ///
+    /// Wire format: `std::string bytes_M`
+    fn handle_srp_bytes_m(
+        &mut self,
+        session: &mut Session,
+        packet: &CommandPacket,
+        _peer_addr: SocketAddr,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut r = WireReader::new(&packet.data);
+        let bytes_m = r.read_string()?;
+
+        let mut pending = match self.pending_srp.remove(&session.peer_id) {
+            Some(p) => p,
+            None => {
+                return Ok(vec![create_access_denied(
+                    AccessDeniedCode::UnexpectedData,
+                    "No pending SRP session",
+                )]);
+            }
+        };
+
+        let player_name = session
+            .player_name
+            .clone()
+            .ok_or_else(|| anyhow!("SRP_BYTES_M without player name"))?;
+
+        match pending.verifier.verify_session(&bytes_m) {
+            Ok(Some(_hamk)) => {
+                info!("SRP auth succeeded for {}", player_name);
+
+                if session.create_player_on_auth_success {
+                    let mut entry = luanti_auth_db::AuthEntry {
+                        id: 0,
+                        name: player_name.clone(),
+                        password: session.enc_pwd.clone().unwrap_or_default(),
+                        privileges: vec![],
+                        last_login: now_secs(),
+                    };
+                    if let Err(e) = self.auth_db.create_auth(&mut entry) {
+                        warn!("Failed to create auth entry: {}", e);
+                        return Ok(vec![create_access_denied(
+                            AccessDeniedCode::ServerFail,
+                            "Failed to create account",
+                        )]);
+                    }
+                    session.create_player_on_auth_success = false;
+                }
+
+                Ok(vec![create_auth_accept_response(
+                    DEFAULT_MAP_SEED,
+                    DEFAULT_SEND_INTERVAL,
+                    AuthMechanism::FirstSrp as u32,
+                )])
+            }
+            Ok(None) => {
+                warn!("SRP auth failed for {} (wrong M)", player_name);
+                Ok(vec![create_access_denied(
+                    AccessDeniedCode::WrongPassword,
+                    "Wrong password",
+                )])
+            }
+            Err(e) => {
+                warn!("SRP_M verification error: {}", e);
+                Ok(vec![create_access_denied(
+                    AccessDeniedCode::UnexpectedData,
+                    "Invalid M",
+                )])
+            }
+        }
+    }
+
+    /// Handle TOSERVER_INIT2 command.
+    ///
+    /// The client sends this as an ACK for TOCLIENT_AUTH_ACCEPT. We send
+    /// it back the init data: ItemDef, NodeDef, media announcement, time
+    /// of day, CSM restrictions, default movement, and announce that
+    /// media is being loaded.
     fn handle_init2(
         &mut self,
         session: &mut Session,
-        _packet: &CommandPacket,
+        packet: &CommandPacket,
         peer_addr: SocketAddr,
-    ) -> Result<Option<Vec<u8>>> {
-        info!("Client {} completed initialization", peer_addr);
-        session.connection_state = ToServerConnectionState::Ingame;
+    ) -> Result<Vec<Vec<u8>>> {
+        // Wire format: optional std::string lang_code
+        let lang = WireReader::new(&packet.data).read_utf8().ok();
 
-        // Send AUTH_ACCEPT
-        Ok(Some(create_auth_accept_response()))
+        info!(
+            "Client {} ({}) sent INIT2 (lang={:?})",
+            peer_addr,
+            session.player_name.as_deref().unwrap_or("?"),
+            lang
+        );
+
+        // Mark the session as in the media-loading phase but keep
+        // connection_state == Startup so the state machine still
+        // accepts the media-related commands.
+        session.media_loading = true;
+
+        // Clear any pending SRP state
+        self.pending_srp.remove(&session.peer_id);
+
+        // Build the init-data packet stream.
+        // For a minimal server with no mods, the ItemDef/NodeDef
+        // payloads can be empty (the client will accept this).
+        let mut responses = Vec::new();
+        responses.push(create_itemdef_response(&[]));
+        responses.push(create_nodedef_response(&[]));
+        responses.push(create_announce_media(
+            &MEDIA_FILES,
+            "", // no remote media server
+        ));
+        responses.push(create_time_of_day(DEFAULT_TIME_OF_DAY, DEFAULT_TIME_SPEED));
+        responses.push(create_csm_restriction_flags(CSM_RF_NONE));
+        responses.push(create_movement(
+            DEFAULT_MOVEMENT.default_speed,
+            DEFAULT_MOVEMENT.walk_speed,
+            DEFAULT_MOVEMENT.crouch_speed,
+            DEFAULT_MOVEMENT.fast_speed,
+            DEFAULT_MOVEMENT.climb_speed,
+            DEFAULT_MOVEMENT.jump_speed,
+            DEFAULT_MOVEMENT.gravity,
+            DEFAULT_MOVEMENT.liquid_fluidity,
+            DEFAULT_MOVEMENT.liquid_fluidity_smooth,
+            DEFAULT_MOVEMENT.liquid_sink,
+            DEFAULT_MOVEMENT.acceleration_default,
+            DEFAULT_MOVEMENT.acceleration_fast,
+            DEFAULT_MOVEMENT.speed_fast,
+            DEFAULT_MOVEMENT.acceleration_air,
+            DEFAULT_MOVEMENT.speed_air,
+            DEFAULT_MOVEMENT.speed_climb,
+            DEFAULT_MOVEMENT.speed_crouch,
+            DEFAULT_MOVEMENT.speed_fast_crouch,
+            DEFAULT_MOVEMENT.speed_walk,
+            DEFAULT_MOVEMENT.liquid_sensitivity,
+        ));
+
+        Ok(responses)
+    }
+
+    /// Handle TOSERVER_REQUEST_MEDIA command.
+    ///
+    /// Wire format: `u16 count | count * std::string name`
+    fn handle_request_media(
+        &mut self,
+        session: &mut Session,
+        packet: &CommandPacket,
+        peer_addr: SocketAddr,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut r = WireReader::new(&packet.data);
+        let count = r.read_u16()? as usize;
+        let mut names = Vec::with_capacity(count);
+        for _ in 0..count {
+            names.push(r.read_utf8()?);
+        }
+        info!(
+            "Client {} ({}) requested {} media file(s)",
+            peer_addr,
+            session.player_name.as_deref().unwrap_or("?"),
+            names.len()
+        );
+
+        // Find the requested files that the server actually has.
+        // For now MEDIA_FILES is empty, so we always send an empty
+        // bunch (count=0). The client will interpret this as "all
+        // requested files are missing/unavailable" and proceed.
+        let available: Vec<String> = names
+            .into_iter()
+            .filter(|n| MEDIA_FILES.iter().any(|m| &m.name == n))
+            .collect();
+
+        let bunches: Vec<Vec<MediaBunchFile>> = if available.is_empty() {
+            // Send one empty bunch to signal the end of the media
+            // transfer without sending any data.
+            vec![vec![]]
+        } else {
+            available
+                .chunks(8)
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .map(|n| {
+                            let data = MEDIA_DATA
+                                .iter()
+                                .find(|(name, _)| name == n)
+                                .map(|(_, d)| d.clone())
+                                .unwrap_or_default();
+                            MediaBunchFile {
+                                name: n.clone(),
+                                data,
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+
+        let total = bunches.len() as u16;
+        let mut responses = Vec::new();
+        for (i, bunch) in bunches.into_iter().enumerate() {
+            responses.push(create_media_bunch(total, i as u16, &bunch));
+        }
+        Ok(responses)
+    }
+
+    /// Handle TOSERVER_HAVE_MEDIA command.
+    ///
+    /// Wire format: `u8 count | count * u32 token`
+    fn handle_have_media(
+        &mut self,
+        session: &mut Session,
+        packet: &CommandPacket,
+        peer_addr: SocketAddr,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut r = WireReader::new(&packet.data);
+        let count = r.read_u8()? as usize;
+        let mut tokens = Vec::with_capacity(count);
+        for _ in 0..count {
+            tokens.push(r.read_u32()?);
+        }
+        info!(
+            "Client {} ({}) acknowledged {} media token(s): {:?}",
+            peer_addr,
+            session.player_name.as_deref().unwrap_or("?"),
+            tokens.len(),
+            tokens
+        );
+        Ok(vec![])
+    }
+
+    /// Handle TOSERVER_GOTBLOCKS command.
+    ///
+    /// Wire format: `u8 count | count * v3s16 pos`
+    fn handle_got_blocks(
+        &mut self,
+        session: &mut Session,
+        packet: &CommandPacket,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut r = WireReader::new(&packet.data);
+        let count = r.read_u8()?;
+        // We don't have a real map yet, so we just acknowledge.
+        debug!(
+            "GOTBLOCKS from peer {} ({} blocks)",
+            session.peer_id, count
+        );
+        let _ = r.rest(); // drop any remaining positions
+        Ok(vec![])
     }
 
     /// Handle TOSERVER_PLAYERPOS command
     fn handle_player_pos(
         &mut self,
         session: &mut Session,
-        packet: &CommandPacket,
-    ) -> Result<Option<Vec<u8>>> {
-        if packet.data.len() < 34 {
-            return Err(anyhow!("PLAYERPOS packet too short"));
-        }
-
-        // Parse position, speed, pitch, yaw, etc.
-        // For now just acknowledge receipt
+        _packet: &CommandPacket,
+    ) -> Result<Vec<Vec<u8>>> {
         debug!("Received PLAYERPOS from peer {}", session.peer_id);
-        Ok(None)
+        Ok(vec![])
     }
 
     /// Handle TOSERVER_CHAT_MESSAGE command
@@ -234,27 +681,10 @@ impl CommandHandler {
         &mut self,
         session: &mut Session,
         packet: &CommandPacket,
-    ) -> Result<Option<Vec<u8>>> {
-        if packet.data.len() < 2 {
-            return Err(anyhow!("CHAT_MESSAGE packet too short"));
-        }
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut r = WireReader::new(&packet.data);
+        let message = r.read_wstring()?;
 
-        let msg_len = u16::from_be_bytes([packet.data[0], packet.data[1]]) as usize;
-        if packet.data.len() < 2 + msg_len * 2 {
-            return Err(anyhow!("CHAT_MESSAGE truncated"));
-        }
-
-        // Parse wide string (UTF-16)
-        let mut wchars = Vec::new();
-        for i in 0..msg_len {
-            let offset = 2 + i * 2;
-            wchars.push(u16::from_be_bytes([
-                packet.data[offset],
-                packet.data[offset + 1],
-            ]));
-        }
-
-        let message = String::from_utf16_lossy(&wchars);
         info!(
             "Chat message from {} ({}): {}",
             session.player_name.as_deref().unwrap_or("unknown"),
@@ -262,86 +692,134 @@ impl CommandHandler {
             message
         );
 
-        // Echo back as server message (for demonstration)
-        Ok(Some(create_chat_message_response(&format!(
+        Ok(vec![create_chat_message_response(&format!(
             "<{}> {}",
             session.player_name.as_deref().unwrap_or("Player"),
             message
-        ))))
+        ))])
     }
 
-    /// Handle TOSERVER_CLIENT_READY command
+    /// Handle TOSERVER_CLIENT_READY command.
+    ///
+    /// Wire format: `u8 major | u8 minor | u8 patch | u8 reserved | std::string full_version | u16 formspec_version`
     fn handle_client_ready(
         &mut self,
         session: &mut Session,
         packet: &CommandPacket,
-    ) -> Result<Option<Vec<u8>>> {
-        if packet.data.len() < 6 {
-            return Err(anyhow!("CLIENT_READY packet too short"));
-        }
-
-        let major = packet.data[0];
-        let minor = packet.data[1];
-        let patch = packet.data[2];
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut r = WireReader::new(&packet.data);
+        let major = r.read_u8()?;
+        let minor = r.read_u8()?;
+        let patch = r.read_u8()?;
+        let _reserved = r.read_u8()?;
+        let full_version = r.read_utf8().unwrap_or_default();
+        // Optional formspec version (since 5.1.0)
+        let _formspec_ver = r.read_u16().ok();
 
         info!(
-            "Client {} ready: version {}.{}.{}",
-            session.peer_id, major, minor, patch
+            "Client {} ready: {}.{}.{} ({})",
+            session.peer_id, major, minor, patch, full_version
         );
 
-        Ok(None)
+        // Client is fully connected.
+        session.client_ready = true;
+        session.connection_state = ToServerConnectionState::Ingame;
+
+        Ok(vec![])
     }
 
-    /// Determine authentication mechanism for a player
-    ///
-    /// Returns the bitmask of supported authentication mechanisms based on:
-    /// - Whether the player exists in the database
-    /// - The format of their stored password
-    fn determine_auth_mechanism(&mut self, player_name: &str) -> Result<u32> {
-        // Try to get auth entry from database
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    /// Determine authentication mechanism for a player.
+    fn determine_auth_mechanism(
+        &mut self,
+        player_name: &str,
+    ) -> Result<(u32, Option<String>)> {
         match self.auth_db.get_auth(player_name) {
             Ok(auth_entry) => {
-                // User exists - check password format
-                let enc_pwd = &auth_entry.password;
-
-                // Check if it's SRP format (component1#component2#component3#component4)
-                let pwd_components: Vec<&str> = enc_pwd.split('#').collect();
-                if pwd_components.len() == 4 {
-                    // Check if it's SRP (mech code "1")
-                    if pwd_components[1] == "1" {
-                        info!("Player {} has SRP password", player_name);
-                        return Ok(AuthMechanism::Srp as u32);
-                    } else {
-                        warn!(
-                            "Player {} has unknown password mechanism: {}",
-                            player_name, pwd_components[1]
-                        );
-                        return Err(anyhow!("Invalid password mechanism"));
-                    }
-                } else if Self::is_valid_base64(enc_pwd) {
-                    // Legacy base64 password
-                    info!("Player {} has legacy password", player_name);
-                    return Ok(AuthMechanism::LegacyPassword as u32);
+                let enc_pwd = auth_entry.password.clone();
+                if base64::is_valid(&enc_pwd) && enc_pwd.starts_with('#') {
+                    Ok((AuthMechanism::Srp as u32, Some(enc_pwd)))
+                } else if base64::is_valid(&enc_pwd) {
+                    Ok((AuthMechanism::LegacyPassword as u32, Some(enc_pwd)))
                 } else {
-                    warn!("Player {} has invalid password format", player_name);
-                    return Err(anyhow!("Invalid password format"));
+                    warn!("Player {} has invalid stored password format", player_name);
+                    Err(anyhow!("Invalid stored password format"))
                 }
             }
             Err(_) => {
-                // User doesn't exist - allow first login with SRP
                 info!("Player {} not found, allowing first SRP", player_name);
-                Ok(AuthMechanism::FirstSrp as u32)
+                Ok((AuthMechanism::FirstSrp as u32, None))
             }
         }
     }
+}
 
-    /// Check if a string is valid base64
-    fn is_valid_base64(s: &str) -> bool {
-        // Simple check: base64 uses only [A-Za-z0-9+/=]
-        s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
-            && !s.is_empty()
-    }
+// --- Module-level constants & helpers --------------------------------------
+
+/// `CSM_RF_NONE` from the C++ `CSMRestrictionFlags` enum.
+const CSM_RF_NONE: u32 = 0x0000_0000;
+
+/// Default movement parameters. Matches the C++ defaults so the client
+/// gets a sane experience.
+struct MovementDefaults {
+    default_speed: f32,
+    walk_speed: f32,
+    crouch_speed: f32,
+    fast_speed: f32,
+    climb_speed: f32,
+    jump_speed: f32,
+    gravity: f32,
+    liquid_fluidity: f32,
+    liquid_fluidity_smooth: f32,
+    liquid_sink: f32,
+    acceleration_default: f32,
+    acceleration_fast: f32,
+    speed_fast: f32,
+    acceleration_air: f32,
+    speed_air: f32,
+    speed_climb: f32,
+    speed_crouch: f32,
+    speed_fast_crouch: f32,
+    speed_walk: f32,
+    liquid_sensitivity: f32,
+}
+
+const DEFAULT_MOVEMENT: MovementDefaults = MovementDefaults {
+    default_speed: 1.0,
+    walk_speed: 1.0,
+    crouch_speed: 1.0,
+    fast_speed: 1.0,
+    climb_speed: 1.0,
+    jump_speed: 1.0,
+    gravity: 1.0,
+    liquid_fluidity: 1.0,
+    liquid_fluidity_smooth: 1.0,
+    liquid_sink: 1.0,
+    acceleration_default: 1.0,
+    acceleration_fast: 1.0,
+    speed_fast: 1.0,
+    acceleration_air: 1.0,
+    speed_air: 1.0,
+    speed_climb: 1.0,
+    speed_crouch: 1.0,
+    speed_fast_crouch: 1.0,
+    speed_walk: 1.0,
+    liquid_sensitivity: 1.0,
+};
+
+/// Server-side media files. Empty by default — extend at startup to
+/// serve actual mods.
+static MEDIA_FILES: Vec<MediaAnnounceEntry> = Vec::new();
+static MEDIA_DATA: Vec<(String, Vec<u8>)> = Vec::new();
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -350,9 +828,8 @@ mod tests {
 
     #[test]
     fn test_command_packet_parse() {
-        let data = vec![0x00, 0x02, 0xAA, 0xBB]; // Command 0x0002 with data
+        let data = vec![0x00, 0x02, 0xAA, 0xBB];
         let packet = CommandPacket::parse(&data, 123).unwrap();
-
         assert_eq!(packet.command, 0x0002);
         assert_eq!(packet.peer_id, 123);
         assert_eq!(packet.data, vec![0xAA, 0xBB]);
@@ -360,7 +837,7 @@ mod tests {
 
     #[test]
     fn test_to_server_command_parsing() {
-        let data = vec![0x00, 0x02]; // TOSERVER_INIT
+        let data = vec![0x00, 0x02];
         let packet = CommandPacket::parse(&data, 1).unwrap();
         assert_eq!(packet.as_to_server_command(), Some(ToServerCommand::Init));
     }

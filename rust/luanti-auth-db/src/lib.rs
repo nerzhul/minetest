@@ -11,7 +11,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! #[cfg(feature = "sqlite")]
 //! {
-//!     let db = luanti_auth_db::sqlite::AuthDatabaseSqlite::new("./world")?;
+//!     let mut db = luanti_auth_db::sqlite::AuthDatabaseSqlite::new("./world")?;
 //!     
 //!     // Create a new user
 //!     let mut auth_entry = AuthEntry {

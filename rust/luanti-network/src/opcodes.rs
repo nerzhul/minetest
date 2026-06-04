@@ -97,9 +97,14 @@ impl ToServerCommand {
     pub fn required_state(&self) -> ToServerConnectionState {
         match self {
             Self::Init => ToServerConnectionState::NotConnected,
-            Self::FirstSrp | Self::SrpBytesA | Self::SrpBytesM | Self::Init2 => {
-                ToServerConnectionState::Startup
-            }
+            Self::FirstSrp
+            | Self::SrpBytesA
+            | Self::SrpBytesM
+            | Self::Init2
+            | Self::GotBlocks
+            | Self::RequestMedia
+            | Self::HaveMedia
+            | Self::ClientReady => ToServerConnectionState::Startup,
             _ => ToServerConnectionState::Ingame,
         }
     }
@@ -157,6 +162,7 @@ pub enum ToClientCommand {
     HudSetParam = 0x4d,
     Breath = 0x4e,
     SetSky = 0x4f,
+    SrpBytesSB = 0x60,
 }
 
 impl ToClientCommand {
@@ -204,6 +210,7 @@ impl ToClientCommand {
             0x4d => Some(Self::HudSetParam),
             0x4e => Some(Self::Breath),
             0x4f => Some(Self::SetSky),
+            0x60 => Some(Self::SrpBytesSB),
             _ => None,
         }
     }
@@ -252,6 +259,7 @@ impl ToClientCommand {
             Self::HudSetParam => "TOCLIENT_HUD_SET_PARAM",
             Self::Breath => "TOCLIENT_BREATH",
             Self::SetSky => "TOCLIENT_SET_SKY",
+            Self::SrpBytesSB => "TOCLIENT_SRP_BYTES_S_B",
         }
     }
 

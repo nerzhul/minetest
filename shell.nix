@@ -6,6 +6,7 @@ pkgs.mkShell {
   env.LC_ALL = "C.UTF-8";
 
   packages = [
+    pkgs.vscode
     pkgs.gcc
     pkgs.cmake
     pkgs.zlib

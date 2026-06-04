@@ -23,6 +23,23 @@ pub struct Session {
     pub connection_state: ToServerConnectionState,
     pub protocol_version: Option<u16>,
     pub player_name: Option<String>,
+    /// Encrypted password (`#1#...` SRP format or base64 legacy), populated
+    /// after TOSERVER_INIT is processed.
+    pub enc_pwd: Option<String>,
+    /// Chosen auth mechanism for the current authentication step.
+    pub chosen_mech: u32,
+    /// Whether we should create the player in the database on successful
+    /// authentication (used when a `default_password` matches a fresh account).
+    pub create_player_on_auth_success: bool,
+    /// Bitmask of auth mechanisms allowed by the server for this session.
+    pub allowed_auth_mechs: u32,
+    /// Whether the client has completed `TOSERVER_INIT2` and is now in
+    /// the media-loading phase. While `false`, media-related commands
+    /// (REQUEST_MEDIA, HAVE_MEDIA, GOTBLOCKS) are rejected.
+    pub media_loading: bool,
+    /// Set to `true` when the client sends `TOSERVER_CLIENT_READY`.
+    /// After this, the client is fully connected.
+    pub client_ready: bool,
 }
 
 impl Session {
@@ -40,6 +57,12 @@ impl Session {
             connection_state: ToServerConnectionState::NotConnected,
             protocol_version: None,
             player_name: None,
+            enc_pwd: None,
+            chosen_mech: 0,
+            create_player_on_auth_success: false,
+            allowed_auth_mechs: 0,
+            media_loading: false,
+            client_ready: false,
         }
     }
 

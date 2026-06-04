@@ -13,6 +13,14 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 luanti-auth-db = { path = "../luanti-auth-db" }
 
+# SRP-6a (SHA-256, 2048-bit)
+num-bigint = { version = "0.4", features = ["rand"] }
+rand = "0.8"
+sha1 = "0.10"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+
 [lib]
 name = "luanti_network"
 path = "src/lib.rs"
