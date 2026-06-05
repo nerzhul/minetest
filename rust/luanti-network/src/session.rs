@@ -33,18 +33,44 @@ pub struct Session {
     pub create_player_on_auth_success: bool,
     /// Bitmask of auth mechanisms allowed by the server for this session.
     pub allowed_auth_mechs: u32,
-    /// Whether the client has completed `TOSERVER_INIT2` and is now in
-    /// the media-loading phase. While `false`, media-related commands
-    /// (REQUEST_MEDIA, HAVE_MEDIA, GOTBLOCKS) are rejected.
-    pub media_loading: bool,
-    /// Set to `true` when the client sends `TOSERVER_CLIENT_READY`.
-    /// After this, the client is fully connected.
-    pub client_ready: bool,
+    /// Progress of the client through the connection handshake.
+    ///
+    /// This replaces the old pair of booleans (`media_loading` /
+    /// `client_ready`) with a single ordered state:
+    ///
+    /// ```text
+    /// Init → MediaLoading → Active
+    /// ```
+    ///
+    /// - `Init`: `TOSERVER_INIT` received, `TOSERVER_INIT2` not yet. Media
+    ///   commands (`REQUEST_MEDIA`, `HAVE_MEDIA`, `GOTBLOCKS`) are rejected.
+    /// - `MediaLoading`: `TOSERVER_INIT2` received; init-data stream sent;
+    ///   media can now be requested.
+    /// - `Active`: `TOSERVER_CLIENT_READY` received; client is fully in-game.
+    pub phase: SessionPhase,
     /// `true` if this session was just created by the call that
     /// returned it. The next packet-processing turn is expected to
     /// inform the client of its assigned peer id via CONTROLTYPE_SET_PEER_ID
     /// and clear this flag.
     pub newly_created: bool,
+}
+
+/// Tracks the progress of a client through the connection handshake.
+///
+/// This is a linear progression: a session is created in `Init`, advances
+/// to `MediaLoading` when `TOSERVER_INIT2` arrives, and finally to `Active`
+/// when `TOSERVER_CLIENT_READY` arrives. The state never goes backwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SessionPhase {
+    /// `TOSERVER_INIT` received, `TOSERVER_INIT2` not yet. Media commands
+    /// (`REQUEST_MEDIA`, `HAVE_MEDIA`, `GOTBLOCKS`, `CLIENT_READY`) are
+    /// rejected.
+    Init = 0,
+    /// `TOSERVER_INIT2` received; init-data sent; media can be requested.
+    MediaLoading = 1,
+    /// `TOSERVER_CLIENT_READY` received; client is fully connected.
+    Active = 2,
 }
 
 impl Session {
@@ -66,8 +92,7 @@ impl Session {
             chosen_mech: 0,
             create_player_on_auth_success: false,
             allowed_auth_mechs: 0,
-            media_loading: false,
-            client_ready: false,
+            phase: SessionPhase::Init,
             newly_created: true,
         }
     }

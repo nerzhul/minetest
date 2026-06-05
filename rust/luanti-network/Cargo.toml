@@ -21,6 +21,14 @@ sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
 
+# Compression for TOCLIENT_ITEMDEF / TOCLIENT_NODEDEF payloads.
+# The C++ client expects zlib for protocol versions < 48 and zstd for
+# protocol versions >= 48. The server must therefore produce a valid
+# (non-empty) compressed stream — passing an empty buffer to the
+# client makes its decompressor fail with EOF.
+flate2 = "1.0"
+zstd = "0.13"
+
 [lib]
 name = "luanti_network"
 path = "src/lib.rs"

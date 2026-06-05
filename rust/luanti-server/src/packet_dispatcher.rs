@@ -219,19 +219,51 @@ fn handle_reliable(
     data: &[u8],
     peer_addr: SocketAddr,
 ) -> Vec<Vec<u8>> {
-    // `data` has the MTP type byte stripped. For a Reliable packet
-    // the next 2 bytes are the u16 sequence number, then the
-    // command + payload.
+    // `data` has the outer MTP type byte stripped. For a Reliable
+    // packet the next 2 bytes are the u16 sequence number, then the
+    // *inner* packet type byte (the C++ MTP wraps every reliable
+    // command in an Original/Split envelope — see
+    // `processReliableSendCommand` in `src/network/mtp/impl.cpp`),
+    // and finally the command + payload.
     if data.len() < 2 {
         return vec![];
     }
     let seqnum = u16::from_be_bytes([data[0], data[1]]);
     debug!("Received RELIABLE packet with seqnum {}", seqnum);
 
-    if data.len() > 2 {
-        handle_command(commands, session, &data[2..], peer_addr, true, seqnum)
-    } else {
-        vec![]
+    if data.len() <= 2 {
+        return vec![];
+    }
+
+    // Strip the inner type byte. For the C++ MTP, this is always
+    // PACKET_TYPE_ORIGINAL (or PACKET_TYPE_SPLIT for large payloads).
+    let inner = &data[2..];
+    if inner.is_empty() {
+        return vec![];
+    }
+    let inner_type = inner[0];
+    let inner_payload = &inner[1..];
+
+    match PacketType::from_u8(inner_type) {
+        Some(PacketType::Control) => handle_control(session, inner_payload, peer_addr),
+        Some(PacketType::Original) => {
+            handle_command(commands, session, inner_payload, peer_addr, true, seqnum)
+        }
+        Some(PacketType::Split) => handle_split(session, inner_payload),
+        Some(PacketType::Reliable) => {
+            warn!(
+                "Nested reliable packet from {} (not allowed in MTP)",
+                peer_addr
+            );
+            vec![]
+        }
+        None => {
+            warn!(
+                "Unknown inner packet type 0x{:02x} inside RELIABLE from {}",
+                inner_type, peer_addr
+            );
+            vec![]
+        }
     }
 }
 
@@ -326,6 +358,18 @@ mod tests {
     /// C++ client would do. Verifies that the dispatcher correctly
     /// parses the SRP_BYTES_A command (0x0051) instead of mis-reading
     /// it as 0x0100 the way the pre-refactor code did.
+    ///
+    /// The C++ MTP wraps every reliable command in an Original
+    /// envelope (see `processReliableSendCommand` in
+    /// `src/network/mtp/impl.cpp`), so the wire for a reliable
+    /// command is actually:
+    ///
+    /// ```text
+    /// [base(7)] [0x03 Reliable] [seqnum(2)] [0x01 Original] [command + payload]
+    /// ```
+    ///
+    /// The test sends the packets in that exact shape, matching what
+    /// the official C++ Minetest client puts on the wire.
     #[test]
     fn reliable_srp_bytes_a_after_init() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -352,6 +396,9 @@ mod tests {
         datagram[6] = 1;
         datagram.push(PacketType::Reliable as u8);
         datagram.extend_from_slice(&0xFFFBu16.to_be_bytes()); // seqnum
+        // C++ MTP wraps every non-raw reliable command in an Original
+        // envelope, so the wire includes an inner type byte.
+        datagram.push(PacketType::Original as u8);
         datagram.extend_from_slice(&init_cmd);
 
         let responses = d.handle_datagram(&datagram, peer).unwrap();
@@ -359,7 +406,11 @@ mod tests {
         // for our reliable, the third is HELLO wrapped in reliable.
         assert_eq!(responses.len(), 3);
         assert_eq!(responses[2][7], PacketType::Reliable as u8);
-        let cmd = u16::from_be_bytes([responses[2][10], responses[2][11]]);
+        // The C++ MTP double-wraps every reliable send, so the
+        // response wire is [base][0x03][seqnum(2)][0x01][command(2)]...
+        assert_eq!(responses[2][10], PacketType::Original as u8,
+            "reliable response must include inner Original type byte for C++ client");
+        let cmd = u16::from_be_bytes([responses[2][11], responses[2][12]]);
         assert_eq!(cmd, 0x0002, "expected TOCLIENT_HELLO (0x0002)");
 
         // ---- 2. SRP_BYTES_A --------------------------------------------
@@ -377,6 +428,7 @@ mod tests {
         datagram[6] = 1;
         datagram.push(PacketType::Reliable as u8);
         datagram.extend_from_slice(&0xFFFCu16.to_be_bytes());
+        datagram.push(PacketType::Original as u8);
         datagram.extend_from_slice(&srp_cmd);
 
         let responses = d.handle_datagram(&datagram, peer).unwrap();
@@ -387,7 +439,110 @@ mod tests {
         assert_eq!(responses[0][7], PacketType::Control as u8);
         assert_eq!(responses[0][8], ControlType::Ack as u8);
         assert_eq!(responses[1][7], PacketType::Reliable as u8);
-        let cmd = u16::from_be_bytes([responses[1][10], responses[1][11]]);
+        assert_eq!(responses[1][10], PacketType::Original as u8,
+            "reliable response must include inner Original type byte for C++ client");
+        let cmd = u16::from_be_bytes([responses[1][11], responses[1][12]]);
         assert_eq!(cmd, 0x000A, "expected TOCLIENT_ACCESS_DENIED (0x000A)");
+    }
+
+    /// Regression test for the FIRST_SRP mis-parse observed with the
+    /// official C++ Minetest client. The client sends TOSERVER_FIRST_SRP
+    /// (0x0050) as a reliable command on channel 1. The C++ MTP
+    /// double-wraps the command in:
+    ///
+    ///   [base(7)] [0x03 Reliable] [seqnum(2)] [0x01 Original] [0x00 0x50 ...]
+    ///
+    /// Before the fix, `handle_reliable` would only strip the seqnum and
+    /// pass the inner `[0x01 0x00 0x50 ...]` to `from_raw`, which would
+    /// read command = 0x0100 ("Unknown command"). This test exercises
+    /// the exact wire format observed in the bug report and asserts the
+    /// dispatcher dispatches it as TOSERVER_FIRST_SRP (0x0050) and
+    /// responds with TOCLIENT_AUTH_ACCEPT (0x0003).
+    #[test]
+    fn first_srp_double_wrapped_is_recognised() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let auth_db = AuthDatabaseSqlite::new(tmp.path()).unwrap();
+        let cmd_handler = crate::CommandHandler::new(37, 43, Box::new(auth_db));
+        let mut d = PacketDispatcher::new(cmd_handler);
+        let peer: SocketAddr = SocketAddrV4::from_str("127.0.0.1:55556").unwrap().into();
+
+        // ---- 1. INIT (also double-wrapped, matches the C++ client) -----
+        let mut init_cmd = Vec::new();
+        init_cmd.extend_from_slice(&0x0002u16.to_be_bytes());
+        init_cmd.push(29);
+        init_cmd.extend_from_slice(&0u16.to_be_bytes());
+        init_cmd.extend_from_slice(&37u16.to_be_bytes());
+        init_cmd.extend_from_slice(&43u16.to_be_bytes());
+        init_cmd.extend_from_slice(&3u16.to_be_bytes());
+        init_cmd.extend_from_slice(b"nrz");
+
+        let mut datagram = vec![0u8; BASE_HEADER_SIZE];
+        datagram[0..4].copy_from_slice(&luanti_network::PROTOCOL_ID.to_be_bytes());
+        datagram[4..6].copy_from_slice(&0u16.to_be_bytes());
+        datagram[6] = 1;
+        datagram.push(PacketType::Reliable as u8);
+        datagram.extend_from_slice(&0xFFFBu16.to_be_bytes());
+        datagram.push(PacketType::Original as u8);
+        datagram.extend_from_slice(&init_cmd);
+        let _ = d.handle_datagram(&datagram, peer).unwrap();
+
+        // ---- 2. FIRST_SRP (double-wrapped) -----------------------------
+        // FirstSrp wire format: u16 salt_len | salt | u16 verifier_len
+        // | verifier | u8 is_empty. We use a 16-byte salt and a
+        // 256-byte verifier (matching what the C++ SRP library
+        // produces) so the server accepts the new player.
+        let salt = vec![0x42u8; 16];
+        let verifier = vec![0xAAu8; 256];
+
+        let mut first_srp = Vec::new();
+        first_srp.extend_from_slice(&0x0050u16.to_be_bytes());
+        first_srp.extend_from_slice(&(salt.len() as u16).to_be_bytes());
+        first_srp.extend_from_slice(&salt);
+        first_srp.extend_from_slice(&(verifier.len() as u16).to_be_bytes());
+        first_srp.extend_from_slice(&verifier);
+        first_srp.push(0); // is_empty
+
+        let mut datagram = vec![0u8; BASE_HEADER_SIZE];
+        datagram[0..4].copy_from_slice(&luanti_network::PROTOCOL_ID.to_be_bytes());
+        datagram[4..6].copy_from_slice(&0u16.to_be_bytes());
+        datagram[6] = 1;
+        datagram.push(PacketType::Reliable as u8);
+        datagram.extend_from_slice(&0xFFFCu16.to_be_bytes());
+        datagram.push(PacketType::Original as u8);
+        datagram.extend_from_slice(&first_srp);
+
+        let responses = d.handle_datagram(&datagram, peer).unwrap();
+        // ACK for the reliable + AUTH_ACCEPT (0x0003) wrapped in a
+        // reliable response. Before the fix the dispatcher would log
+        // "Unknown command 0x0100" and return only the ACK.
+        assert_eq!(
+            responses.len(),
+            2,
+            "expected ACK + AUTH_ACCEPT, got {} responses",
+            responses.len()
+        );
+        assert_eq!(responses[0][7], PacketType::Control as u8);
+        assert_eq!(responses[0][8], ControlType::Ack as u8);
+        assert_eq!(responses[1][7], PacketType::Reliable as u8);
+        // Reliable responses are double-wrapped by `wrap_reliable`:
+        // [base][0x03][seqnum(2)][0x01 Original][command(2)]...
+        assert_eq!(
+            responses[1][10], PacketType::Original as u8,
+            "reliable response must include inner Original type byte for C++ client"
+        );
+        let cmd = u16::from_be_bytes([responses[1][11], responses[1][12]]);
+        assert_eq!(
+            cmd, 0x0003,
+            "expected TOCLIENT_AUTH_ACCEPT (0x0003), got 0x{:04x}",
+            cmd
+        );
+        // AUTH_ACCEPT payload must match the C++ client's reader:
+        // v3f(12) + u64(8) + f32(4) + u32(4) = 28 bytes after the
+        // 2-byte command.
+        assert_eq!(
+            responses[1].len(),
+            7 + 1 + 2 + 1 + 2 + 12 + 8 + 4 + 4,
+            "AUTH_ACCEPT response total wire size mismatch"
+        );
     }
 }

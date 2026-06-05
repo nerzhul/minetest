@@ -21,6 +21,6 @@ pub use opcodes::{
 };
 pub use network_packet::{NetworkPacket, PacketError, PacketResult};
 pub use protocol::*;
-pub use session::{Session, SessionManager};
+pub use session::{Session, SessionManager, SessionPhase};
 pub use srp::SrpVerifier;
 pub use toclient_packets::*;

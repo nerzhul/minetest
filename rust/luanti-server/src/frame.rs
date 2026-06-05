@@ -48,11 +48,27 @@ pub fn wrap_original(payload: &[u8]) -> Vec<u8> {
 }
 
 /// Wrap a command + payload in a `Reliable` MTP datagram on channel 0.
+///
+/// The C++ MTP wraps every non-raw reliable command in an `Original`
+/// envelope (see `UDPPeer::processReliableSendCommand` in
+/// `src/network/mtp/impl.cpp`). The official client's MTP receive
+/// path strips the reliable header and then calls `processPacket`,
+/// which reads the first byte after the reliable header as the inner
+/// packet type. If we omit that inner type byte, the C++ client
+/// mis-interprets the first byte of the command (e.g. `0x00` from
+/// AUTH_ACCEPT 0x0003) as `PacketType::Control` and the second byte
+/// as a `ControlType`, which for AUTH_ACCEPT happens to be `Disco`
+/// and causes the client to abort with
+/// "Connection aborted (protocol error?)".
 pub fn wrap_reliable(seqnum: u16, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(BASE_HEADER_SIZE + 3 + payload.len());
+    let mut out = Vec::with_capacity(BASE_HEADER_SIZE + 4 + payload.len());
     out.extend_from_slice(&build_base_header(PEER_ID_SERVER, 0));
     out.push(PacketType::Reliable as u8);
     out.extend_from_slice(&seqnum.to_be_bytes());
+    // Inner type byte: the C++ MTP wraps every non-raw reliable send
+    // in an Original envelope. The client strips the outer reliable
+    // header and expects to find this type byte next.
+    out.push(PacketType::Original as u8);
     out.extend_from_slice(payload);
     out
 }
@@ -123,7 +139,10 @@ mod tests {
         assert_eq!(p[6], 0);
         assert_eq!(p[7], PacketType::Reliable as u8);
         assert_eq!(p[8..10], 0x00FFu16.to_be_bytes());
-        assert_eq!(&p[10..], &[0x01, 0x02]);
+        // C++ MTP double-wraps every reliable send, so we include an
+        // inner Original type byte after the seqnum.
+        assert_eq!(p[10], PacketType::Original as u8);
+        assert_eq!(&p[11..], &[0x01, 0x02]);
     }
 
     #[test]

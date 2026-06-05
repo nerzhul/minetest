@@ -18,10 +18,11 @@ use luanti_network::{
     create_access_denied, create_announce_media, create_auth_accept_response,
     create_chat_message_response, create_csm_restriction_flags, create_hello_response,
     create_itemdef_response, create_media_bunch, create_movement, create_nodedef_response,
-    create_srp_bytes_s_b_response, create_time_of_day,
+    create_srp_bytes_s_b_response, create_time_of_day, serialize_empty_itemdef,
+    serialize_empty_nodedef,
     srp as srp_helpers,
     AccessDeniedCode, AuthMechanism, MediaAnnounceEntry, MediaBunchFile, NetworkPacket, Session,
-    SrpVerifier, ToServerCommand, ToServerConnectionState,
+    SessionPhase, SrpVerifier, ToServerCommand, ToServerConnectionState,
 };
 
 use crate::frame::hex_preview;
@@ -139,8 +140,9 @@ impl CommandHandler {
 
     /// Check if command is allowed in current session state.
     fn check_command_state(&self, session: &Session, cmd: ToServerCommand) -> bool {
-        // Special case: media-loading commands are only allowed after
-        // TOSERVER_INIT2 has been received.
+        // Special case: media-loading commands are only allowed once the
+        // session has reached the `MediaLoading` or `Active` phase (i.e.
+        // TOSERVER_INIT2 has been processed).
         if matches!(
             cmd,
             ToServerCommand::RequestMedia
@@ -150,7 +152,7 @@ impl CommandHandler {
         ) {
             return std::mem::discriminant(&cmd.required_state())
                 == std::mem::discriminant(&session.connection_state)
-                && session.media_loading;
+                && session.phase != SessionPhase::Init;
         }
         std::mem::discriminant(&cmd.required_state())
             == std::mem::discriminant(&session.connection_state)
@@ -214,8 +216,7 @@ impl CommandHandler {
         session.allowed_auth_mechs = auth_mechs;
         session.chosen_mech = AuthMechanism::None as u32;
         session.create_player_on_auth_success = false;
-        session.media_loading = false;
-        session.client_ready = false;
+        session.phase = SessionPhase::Init;
         session.connection_state = ToServerConnectionState::Startup;
 
         debug!(
@@ -496,17 +497,28 @@ impl CommandHandler {
         // Mark the session as in the media-loading phase but keep
         // connection_state == Startup so the state machine still
         // accepts the media-related commands.
-        session.media_loading = true;
+        session.phase = SessionPhase::MediaLoading;
 
         // Clear any pending SRP state
         self.pending_srp.remove(&session.peer_id);
 
         // Build the init-data packet stream.
-        // For a minimal server with no mods, the ItemDef/NodeDef
-        // payloads can be empty (the client will accept this).
+        // The ItemDef/NodeDef payloads cannot be empty: the C++ client
+        // runs the bytes through zlib/zstd and then deserializes a
+        // versioned manager, so an empty (or zero-length compressed)
+        // stream trips `decompressZlib`/`decompressZstd` with EOF and
+        // aborts the connection. We send a valid *empty* manager
+        // (just version + zero counts) which the client decompresses
+        // and deserializes successfully.
+        let negotiated_proto = session
+            .protocol_version
+            .ok_or_else(|| anyhow!("INIT2 before protocol negotiation"))?;
+        let itemdef_payload = serialize_empty_itemdef();
+        let nodedef_payload = serialize_empty_nodedef();
+
         let mut responses = Vec::new();
-        responses.push(create_itemdef_response(&[]));
-        responses.push(create_nodedef_response(&[]));
+        responses.push(create_itemdef_response(&itemdef_payload, negotiated_proto));
+        responses.push(create_nodedef_response(&nodedef_payload, negotiated_proto));
         responses.push(create_announce_media(&MEDIA_FILES, ""));
         responses.push(create_time_of_day(DEFAULT_TIME_OF_DAY, DEFAULT_TIME_SPEED));
         responses.push(create_csm_restriction_flags(CSM_RF_NONE));
@@ -696,7 +708,7 @@ impl CommandHandler {
         );
 
         // Client is fully connected.
-        session.client_ready = true;
+        session.phase = SessionPhase::Active;
         session.connection_state = ToServerConnectionState::Ingame;
 
         Ok(vec![])
@@ -966,7 +978,7 @@ mod tests {
         // Should send ItemDef + NodeDef + AnnounceMedia + TimeOfDay +
         // CsmRestrictionFlags + Movement = 6 packets.
         assert!(r.len() >= 6);
-        assert!(session.media_loading);
+        assert_eq!(session.phase, SessionPhase::MediaLoading);
 
         // 4. CLIENT_READY
         let mut p = NetworkPacket::new(0x0043, 0);
@@ -979,7 +991,7 @@ mod tests {
             .handle_command(&mut session, &p, "127.0.0.1:0".parse().unwrap())
             .unwrap();
         assert!(r.is_empty());
-        assert!(session.client_ready);
+        assert_eq!(session.phase, SessionPhase::Active);
         assert_eq!(
             session.connection_state,
             ToServerConnectionState::Ingame

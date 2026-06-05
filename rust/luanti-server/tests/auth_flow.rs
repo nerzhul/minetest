@@ -18,7 +18,7 @@ use std::str::FromStr;
 use luanti_auth_db::sqlite::AuthDatabaseSqlite;
 use luanti_auth_db::AuthDatabase;
 use luanti_network::{
-    auth, wire::WireReader, NetworkPacket, ToClientCommand, ToServerCommand,
+    auth, wire::WireReader, NetworkPacket, SessionPhase, ToClientCommand, ToServerCommand,
     ToServerConnectionState,
 };
 use luanti_server::command_handler::CommandHandler;
@@ -93,7 +93,7 @@ fn full_handshake() {
     let init_responses = handler
         .handle_command(&mut session, &init2, peer)
         .unwrap();
-    assert!(session.media_loading, "session should be in media-loading phase");
+    assert_eq!(session.phase, SessionPhase::MediaLoading, "session should be in media-loading phase");
 
     let opcodes: Vec<ToClientCommand> = init_responses.iter().map(|r| op_of(r)).collect();
     assert!(opcodes.contains(&ToClientCommand::ItemDef), "missing ItemDef: {:?}", opcodes);
@@ -130,7 +130,7 @@ fn full_handshake() {
     ready.write_utf8("5.9.0");
     let responses = handler.handle_command(&mut session, &ready, peer).unwrap();
     assert!(responses.is_empty(), "CLIENT_READY has no response");
-    assert!(session.client_ready);
+    assert_eq!(session.phase, SessionPhase::Active);
     assert_eq!(session.connection_state, ToServerConnectionState::Ingame);
 }
 
