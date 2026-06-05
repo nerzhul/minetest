@@ -3,11 +3,18 @@
 //! This module provides functions to create protocol packets sent from the server to clients.
 //! These are pure functions that don't depend on session state and can be reused across
 //! different server implementations.
+//!
+//! All creators build a `NetworkPacket` and return its serialized bytes
+//! (command opcode + payload), exactly mirroring how the C++ server uses
+//! `NetworkPacket` (e.g. `NetworkPacket resp_pkt(TOCLIENT_FOO, 0,
+//! peer_id); resp_pkt << ...; Send(&resp_pkt);`).
 
 use std::io::Write;
 
-use crate::opcodes::{AccessDeniedCode, ToClientCommand};
-use crate::wire::WireWriter;
+use crate::network_packet::NetworkPacket;
+use crate::opcodes::{
+    AccessDeniedCode, ModChannelSignal, ToClientCommand,
+};
 
 /// Create TOCLIENT_HELLO response
 ///
@@ -22,15 +29,14 @@ pub fn create_hello_response(
     serialization_version: u8,
     protocol_version: u16,
     auth_mechs: u32,
-) -> Vec<u8> {
-    let mut w = WireWriter::with_capacity(2 + 1 + 2 + 2 + 4 + 2);
-    w.write_u16(ToClientCommand::Hello as u16);
-    w.write_u8(serialization_version);
-    w.write_u16(0); // compression (unused)
-    w.write_u16(protocol_version);
-    w.write_u32(auth_mechs);
-    w.write_string(b""); // unused username
-    w.into_bytes()
+) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::Hello as u16, 1 + 2 + 2 + 4 + 2);
+    p.write_u8(serialization_version);
+    p.write_u16(0); // compression (unused)
+    p.write_u16(protocol_version);
+    p.write_u32(auth_mechs);
+    p.write_utf8(""); // unused username
+    p
 }
 
 /// Create TOCLIENT_SRP_BYTES_S_B response
@@ -42,12 +48,11 @@ pub fn create_hello_response(
 /// # Arguments
 /// * `salt` - The per-user salt
 /// * `bytes_b` - The server's B value (256 bytes for 2048-bit SRP)
-pub fn create_srp_bytes_s_b_response(salt: &[u8], bytes_b: &[u8]) -> Vec<u8> {
-    let mut w = WireWriter::with_capacity(2 + 2 + salt.len() + 2 + bytes_b.len());
-    w.write_u16(ToClientCommand::SrpBytesSB as u16);
-    w.write_string(salt);
-    w.write_string(bytes_b);
-    w.into_bytes()
+pub fn create_srp_bytes_s_b_response(salt: &[u8], bytes_b: &[u8]) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::SrpBytesSB as u16, 2 + salt.len() + 2 + bytes_b.len());
+    p.write_string(salt);
+    p.write_string(bytes_b);
+    p
 }
 
 /// Create TOCLIENT_AUTH_ACCEPT response
@@ -74,14 +79,13 @@ pub fn create_auth_accept_response(
     map_seed: u64,
     send_interval: f32,
     sudo_auth_mechs: u32,
-) -> Vec<u8> {
-    let mut w = WireWriter::with_capacity(2 + 12 + 8 + 4 + 4);
-    w.write_u16(ToClientCommand::AuthAccept as u16);
-    w.write_v3f(0.0, 0.0, 0.0); // unused position
-    w.write_u64(map_seed);
-    w.write_f32(send_interval);
-    w.write_u32(sudo_auth_mechs);
-    w.into_bytes()
+) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::AuthAccept as u16, 12 + 8 + 4 + 4);
+    p.write_v3f(0.0, 0.0, 0.0); // unused position
+    p.write_u64(map_seed);
+    p.write_f32(send_interval);
+    p.write_u32(sudo_auth_mechs);
+    p
 }
 
 /// Create TOCLIENT_ACCESS_DENIED response
@@ -91,13 +95,12 @@ pub fn create_auth_accept_response(
 /// # Arguments
 /// * `code` - The denial reason code
 /// * `message` - Human-readable message explaining the denial
-pub fn create_access_denied(code: AccessDeniedCode, message: &str) -> Vec<u8> {
-    let mut w = WireWriter::with_capacity(2 + 1 + 2 + message.len() + 1);
-    w.write_u16(ToClientCommand::AccessDenied as u16);
-    w.write_u8(code as u8);
-    w.write_utf8(message);
-    w.write_u8(0); // reconnect
-    w.into_bytes()
+pub fn create_access_denied(code: AccessDeniedCode, message: &str) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::AccessDenied as u16, 1 + 2 + message.len() + 1);
+    p.write_u8(code as u8);
+    p.write_utf8(message);
+    p.write_u8(0); // reconnect
+    p
 }
 
 /// Create TOCLIENT_CHAT_MESSAGE response
@@ -107,14 +110,13 @@ pub fn create_access_denied(code: AccessDeniedCode, message: &str) -> Vec<u8> {
 ///
 /// # Arguments
 /// * `message` - The message text to send
-pub fn create_chat_message_response(message: &str) -> Vec<u8> {
-    let mut w = WireWriter::new();
-    w.write_u16(ToClientCommand::ChatMessage as u16);
-    w.write_u8(1); // version
-    w.write_u8(0); // message type (normal)
-    w.write_wstring(""); // sender name
-    w.write_wstring(message);
-    w.into_bytes()
+pub fn create_chat_message_response(message: &str) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::ChatMessage as u16, 0);
+    p.write_u8(1); // version
+    p.write_u8(0); // message type (normal)
+    p.write_wstring(""); // sender name
+    p.write_wstring(message);
+    p
 }
 
 /// A single media file entry for `TOCLIENT_ANNOUNCE_MEDIA`.
@@ -134,18 +136,17 @@ pub struct MediaAnnounceEntry {
 /// # Arguments
 /// * `files` - the media files to announce
 /// * `remote_media` - the comma-separated list of remote media server URLs
-pub fn create_announce_media(files: &[MediaAnnounceEntry], remote_media: &str) -> Vec<u8> {
-    let mut w = WireWriter::new();
-    w.write_u16(ToClientCommand::AnnounceMedia as u16);
-    w.write_u16(files.len() as u16);
+pub fn create_announce_media(files: &[MediaAnnounceEntry], remote_media: &str) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::AnnounceMedia as u16, 0);
+    p.write_u16(files.len() as u16);
     for f in files {
-        w.write_utf8(&f.name);
+        p.write_utf8(&f.name);
         // base64-encode the raw SHA-1 digest
         let b64 = crate::base64_util::encode(&f.sha1_digest);
-        w.write_utf8(&b64);
+        p.write_utf8(&b64);
     }
-    w.write_utf8(remote_media);
-    w.into_bytes()
+    p.write_utf8(remote_media);
+    p
 }
 
 /// A single media file entry for `TOCLIENT_MEDIA` (one bunch).
@@ -165,18 +166,17 @@ pub fn create_media_bunch(
     total_bunches: u16,
     bunch_index: u16,
     files: &[MediaBunchFile],
-) -> Vec<u8> {
-    let mut w = WireWriter::new();
-    w.write_u16(ToClientCommand::Media as u16);
-    w.write_u16(total_bunches);
-    w.write_u16(bunch_index);
-    w.write_u32(files.len() as u32);
+) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::Media as u16, 0);
+    p.write_u16(total_bunches);
+    p.write_u16(bunch_index);
+    p.write_u32(files.len() as u32);
     for f in files {
-        w.write_utf8(&f.name);
+        p.write_utf8(&f.name);
         // data: u32 length + raw bytes (long string, no compression)
-        w.write_long_string(&f.data);
+        p.write_long_string(&f.data);
     }
-    w.into_bytes()
+    p
 }
 
 /// Create `TOCLIENT_NODEDEF` packet (compressed node definitions).
@@ -191,12 +191,11 @@ pub fn create_media_bunch(
 /// manager must serialize to at least 7 bytes (version + count + string
 /// length prefix), because the client's decompressor rejects an empty
 /// input stream with `EOF`.
-pub fn create_nodedef_response(serialized: &[u8], protocol_version: u16) -> Vec<u8> {
+pub fn create_nodedef_response(serialized: &[u8], protocol_version: u16) -> NetworkPacket {
     let compressed = compress_definitions(serialized, protocol_version);
-    let mut w = WireWriter::new();
-    w.write_u16(ToClientCommand::NodeDef as u16);
-    w.write_long_string(&compressed);
-    w.into_bytes()
+    let mut p = NetworkPacket::new(ToClientCommand::NodeDef as u16, compressed.len() + 4);
+    p.write_long_string(&compressed);
+    p
 }
 
 /// Create `TOCLIENT_ITEMDEF` packet (compressed item definitions).
@@ -204,12 +203,11 @@ pub fn create_nodedef_response(serialized: &[u8], protocol_version: u16) -> Vec<
 /// The payload is a serialized `ItemDefManager`, compressed with zlib
 /// (protocol < 48) or zstd (protocol >= 48). See `create_nodedef_response`
 /// for the rationale behind the compression.
-pub fn create_itemdef_response(serialized: &[u8], protocol_version: u16) -> Vec<u8> {
+pub fn create_itemdef_response(serialized: &[u8], protocol_version: u16) -> NetworkPacket {
     let compressed = compress_definitions(serialized, protocol_version);
-    let mut w = WireWriter::new();
-    w.write_u16(ToClientCommand::ItemDef as u16);
-    w.write_long_string(&compressed);
-    w.into_bytes()
+    let mut p = NetworkPacket::new(ToClientCommand::ItemDef as u16, compressed.len() + 4);
+    p.write_long_string(&compressed);
+    p
 }
 
 /// Serialize an empty `ItemDefManager` in the C++ wire format.
@@ -228,11 +226,11 @@ pub fn create_itemdef_response(serialized: &[u8], protocol_version: u16) -> Vec<
 /// "empty" manager is equivalent to a server with no registered items
 /// and produces a working client-side manager.
 pub fn serialize_empty_itemdef() -> Vec<u8> {
-    let mut w = WireWriter::new();
-    w.write_u8(0); // version
-    w.write_u16(0); // count
-    w.write_u16(0); // alias_count
-    w.into_bytes()
+    let mut p = NetworkPacket::new(0, 0);
+    p.write_u8(0); // version
+    p.write_u16(0); // count
+    p.write_u16(0); // alias_count
+    p.take_payload()
 }
 
 /// Serialize an empty `NodeDefManager` in the C++ wire format.
@@ -248,11 +246,11 @@ pub fn serialize_empty_itemdef() -> Vec<u8> {
 ///
 /// `string32` is a u32 length prefix followed by the raw bytes.
 pub fn serialize_empty_nodedef() -> Vec<u8> {
-    let mut w = WireWriter::new();
-    w.write_u8(1); // version
-    w.write_u16(0); // count
-    w.write_u32(0); // string32 length = 0 (no inner data)
-    w.into_bytes()
+    let mut p = NetworkPacket::new(0, 0);
+    p.write_u8(1); // version
+    p.write_u16(0); // count
+    p.write_u32(0); // string32 length = 0 (no inner data)
+    p.take_payload()
 }
 
 /// Compress a serialized def manager with the codec the negotiated
@@ -294,109 +292,158 @@ fn compress_definitions(serialized: &[u8], protocol_version: u16) -> Vec<u8> {
 /// # Arguments
 /// * `time_of_day` - 0..=23999, 0 = midnight, 12000 = noon
 /// * `time_speed` - speed of the day/night cycle (in game-time units per real second)
-pub fn create_time_of_day(time_of_day: u16, time_speed: f32) -> Vec<u8> {
-    let mut w = WireWriter::new();
-    w.write_u16(ToClientCommand::TimeOfDay as u16);
-    w.write_u16(time_of_day);
-    w.write_f32(time_speed);
-    w.into_bytes()
+pub fn create_time_of_day(time_of_day: u16, time_speed: f32) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::TimeOfDay as u16, 2 + 4);
+    p.write_u16(time_of_day);
+    p.write_f32(time_speed);
+    p
 }
 
 /// Create `TOCLIENT_CSM_RESTRICTION_FLAGS` (client-side mod restrictions).
 ///
+/// Wire format (matches `Server::SendCSMRestrictionFlags` in
+/// `src/server.cpp` and `Client::handleCommand_CSMRestrictionFlags` in
+/// `src/network/clientpackethandler.cpp`):
+///
+/// ```text
+/// u32 CSMRestrictionFlags byteflag
+/// u32 csm_restriction_noderange
+/// ```
+///
 /// `flags` is a `CSMRestrictionFlags` bitmask. `0` disables all
 /// restrictions; `CSM_RF_ALL` (0xFFFFFFFF) enables all.
-pub fn create_csm_restriction_flags(flags: u32) -> Vec<u8> {
-    let mut w = WireWriter::new();
-    w.write_u16(ToClientCommand::CsmRestrictionFlags as u16);
-    w.write_u32(flags);
-    w.into_bytes()
+///
+/// `noderange` caps the radius (in nodes) of the CSM `get_node` /
+/// `get_node_or_nil` lookups, used when the `LOOKUP_NODES_LIMIT`
+/// restriction flag is set. The C++ server's default is `8`
+/// (`g_settings->getU32("csm_restriction_noderange")`); we use the
+/// same default here. **Both fields must be present** on the wire —
+/// sending only `flags` makes the C++ client abort with
+/// `Reading outside packet (offset: 4, packet size: 4)`.
+pub fn create_csm_restriction_flags(flags: u64, noderange: u32) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::CsmRestrictionFlags as u16, 8);
+    p.write_u64(flags);
+    p.write_u32(noderange);
+    p
 }
 
 /// Create `TOCLIENT_MOVEMENT` (default movement parameters).
 ///
-/// # Arguments
-/// * `default_speed` - default movement speed (units/s)
-/// * `walk_speed` - walking speed
-/// * `crouch_speed` - crouching speed
-/// * `fast_speed` - fast (sprint) speed
-/// * `climb_speed` - climbing speed
-/// * `jump_speed` - jump velocity
-/// * `gravity` - gravity acceleration
-/// * `liquid_fluidity` - liquid fluidity multiplier
-/// * `liquid_fluidity_smooth` - liquid smoothing
-/// * `liquid_sink` - sink rate in liquids
-/// * `acceleration_default` - default acceleration in air
-/// * `acceleration_fast` - fast (sprint) acceleration in air
-/// * `speed_fast` - fast (sprint) movement speed
-/// * `acceleration_air` - midair acceleration
-/// * `speed_air` - midair speed
-/// * `speed_climb` - climb speed
-/// * `speed_crouch` - crouch walk speed
-/// * `speed_fast_crouch` - crouch fast speed
-/// * `speed_walk` - walk speed
-/// * `liquid_sensitivity` - liquid jump sensitivity
+/// Wire format (matches `Server::SendMovement` in `src/server.cpp` and
+/// `Client::handleCommand_Movement` in
+/// `src/network/clientpackethandler.cpp`):
+///
+/// ```text
+/// f32 movement_acceleration_default
+/// f32 movement_acceleration_air
+/// f32 movement_acceleration_fast
+/// f32 movement_speed_walk
+/// f32 movement_speed_crouch
+/// f32 movement_speed_fast
+/// f32 movement_speed_climb
+/// f32 movement_speed_jump
+/// f32 movement_liquid_fluidity
+/// f32 movement_liquid_fluidity_smooth
+/// f32 movement_liquid_sink
+/// f32 movement_gravity
+/// ```
+///
+/// **Exactly 12 floats** must be sent. The previous version of this
+/// function sent 20 fields (which the C++ client silently truncates
+/// after reading 12) but the extra 32 bytes of trailing payload
+/// shifted the parse cursor and could mask other wire bugs. We now
+/// match the C++ exactly: 12 × 4 = 48 bytes of payload.
 pub fn create_movement(
-    default_speed: f32,
-    walk_speed: f32,
-    crouch_speed: f32,
-    fast_speed: f32,
-    climb_speed: f32,
-    jump_speed: f32,
-    gravity: f32,
+    acceleration_default: f32,
+    acceleration_air: f32,
+    acceleration_fast: f32,
+    speed_walk: f32,
+    speed_crouch: f32,
+    speed_fast: f32,
+    speed_climb: f32,
+    speed_jump: f32,
     liquid_fluidity: f32,
     liquid_fluidity_smooth: f32,
     liquid_sink: f32,
-    acceleration_default: f32,
-    acceleration_fast: f32,
-    speed_fast: f32,
-    acceleration_air: f32,
-    speed_air: f32,
-    speed_climb: f32,
-    speed_crouch: f32,
-    speed_fast_crouch: f32,
-    speed_walk: f32,
-    liquid_sensitivity: f32,
-) -> Vec<u8> {
-    let mut w = WireWriter::new();
-    w.write_u16(ToClientCommand::Movement as u16);
-    w.write_f32(default_speed);
-    w.write_f32(walk_speed);
-    w.write_f32(crouch_speed);
-    w.write_f32(fast_speed);
-    w.write_f32(climb_speed);
-    w.write_f32(jump_speed);
-    w.write_f32(gravity);
-    w.write_f32(liquid_fluidity);
-    w.write_f32(liquid_fluidity_smooth);
-    w.write_f32(liquid_sink);
-    w.write_f32(acceleration_default);
-    w.write_f32(acceleration_fast);
-    w.write_f32(speed_fast);
-    w.write_f32(acceleration_air);
-    w.write_f32(speed_air);
-    w.write_f32(speed_climb);
-    w.write_f32(speed_crouch);
-    w.write_f32(speed_fast_crouch);
-    w.write_f32(speed_walk);
-    w.write_f32(liquid_sensitivity);
-    w.into_bytes()
+    gravity: f32,
+) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::Movement as u16, 12 * 4);
+    p.write_f32(acceleration_default);
+    p.write_f32(acceleration_air);
+    p.write_f32(acceleration_fast);
+    p.write_f32(speed_walk);
+    p.write_f32(speed_crouch);
+    p.write_f32(speed_fast);
+    p.write_f32(speed_climb);
+    p.write_f32(speed_jump);
+    p.write_f32(liquid_fluidity);
+    p.write_f32(liquid_fluidity_smooth);
+    p.write_f32(liquid_sink);
+    p.write_f32(gravity);
+    p
 }
+
+// --- Mod channel packets ---------------------------------------------------
+
+/// Create `TOCLIENT_MODCHANNEL_SIGNAL`.
+///
+/// Wire format (matches `Server::handleCommand_ModChannelJoin/Leave` in
+/// `src/network/serverpackethandler.cpp`):
+///
+/// ```text
+/// u8  signal       (one of ModChannelSignal)
+/// std::string channel_name
+/// ```
+///
+/// # Arguments
+/// * `signal` - the kind of signal to send
+/// * `channel_name` - the channel name the signal refers to
+pub fn create_modchannel_signal(signal: ModChannelSignal, channel_name: &str) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::ModChannelSignal as u16, 1 + 2 + channel_name.len());
+    p.write_u8(signal as u8);
+    p.write_utf8(channel_name);
+    p
+}
+
+/// Create `TOCLIENT_MODCHANNEL_MSG`.
+///
+/// Wire format:
+///
+/// ```text
+/// std::string channel_name
+/// std::string channel_msg
+/// ```
+pub fn create_modchannel_msg(channel_name: &str, channel_msg: &str) -> NetworkPacket {
+    let mut p = NetworkPacket::new(ToClientCommand::ModChannelMsg as u16, 2 + channel_name.len() + 2 + channel_msg.len());
+    p.write_utf8(channel_name);
+    p.write_utf8(channel_msg);
+    p
+}
+
+// Re-exports for convenience -----------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::opcodes::ToClientCommand;
+
+    /// Render a `NetworkPacket` (command + payload) back into raw bytes
+    /// for byte-level assertions. The tests below rely on the exact
+    /// wire layout of each packet.
+    fn bytes(p: &NetworkPacket) -> Vec<u8> {
+        p.into_raw_bytes()
+    }
 
     #[test]
     fn test_create_hello_response() {
-        let packet = create_hello_response(29, 42, 0x01);
+        let packet = bytes(&create_hello_response(29, 42, 0x01));
         assert_eq!(packet[0..2], (ToClientCommand::Hello as u16).to_be_bytes());
         assert_eq!(packet[2], 29); // serialization version
     }
 
     #[test]
     fn test_create_auth_accept_response() {
-        let packet = create_auth_accept_response(12345, 0.1, 0);
+        let packet = bytes(&create_auth_accept_response(12345, 0.1, 0));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::AuthAccept as u16).to_be_bytes()
@@ -416,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_create_time_of_day() {
-        let packet = create_time_of_day(6000, 1.0);
+        let packet = bytes(&create_time_of_day(6000, 1.0));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::TimeOfDay as u16).to_be_bytes()
@@ -434,7 +481,7 @@ mod tests {
     fn test_create_srp_bytes_s_b_response() {
         let salt = [0u8; 16];
         let b = [0u8; 256];
-        let packet = create_srp_bytes_s_b_response(&salt, &b);
+        let packet = bytes(&create_srp_bytes_s_b_response(&salt, &b));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::SrpBytesSB as u16).to_be_bytes()
@@ -445,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_create_access_denied() {
-        let packet = create_access_denied(AccessDeniedCode::WrongVersion, "Test message");
+        let packet = bytes(&create_access_denied(AccessDeniedCode::WrongVersion, "Test message"));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::AccessDenied as u16).to_be_bytes()
@@ -455,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_create_chat_message_response() {
-        let packet = create_chat_message_response("Hello");
+        let packet = bytes(&create_chat_message_response("Hello"));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::ChatMessage as u16).to_be_bytes()
@@ -488,7 +535,7 @@ mod tests {
     fn test_itemdef_response_uses_zlib_below_proto_48() {
         // proto < 48 → zlib. A zlib stream starts with a 2-byte header
         // whose first byte is `0x78` (CMF: deflate, 32K window).
-        let packet = create_itemdef_response(&serialize_empty_itemdef(), 42);
+        let packet = bytes(&create_itemdef_response(&serialize_empty_itemdef(), 42));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::ItemDef as u16).to_be_bytes()
@@ -505,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_nodedef_response_uses_zlib_below_proto_48() {
-        let packet = create_nodedef_response(&serialize_empty_nodedef(), 42);
+        let packet = bytes(&create_nodedef_response(&serialize_empty_nodedef(), 42));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::NodeDef as u16).to_be_bytes()
@@ -521,7 +568,7 @@ mod tests {
     fn test_itemdef_response_uses_zstd_at_or_above_proto_48() {
         // proto >= 48 → zstd. A zstd frame starts with magic 0x28 0xB5
         // 0x2F 0xFD.
-        let packet = create_itemdef_response(&serialize_empty_itemdef(), 48);
+        let packet = bytes(&create_itemdef_response(&serialize_empty_itemdef(), 48));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::ItemDef as u16).to_be_bytes()
@@ -539,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_nodedef_response_uses_zstd_at_or_above_proto_48() {
-        let packet = create_nodedef_response(&serialize_empty_nodedef(), 48);
+        let packet = bytes(&create_nodedef_response(&serialize_empty_nodedef(), 48));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::NodeDef as u16).to_be_bytes()
@@ -560,7 +607,7 @@ mod tests {
         use std::io::Read;
 
         let original = serialize_empty_itemdef();
-        let packet = create_itemdef_response(&original, 42);
+        let packet = bytes(&create_itemdef_response(&original, 42));
         let compressed_len = u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]])
             as usize;
         let mut decoder = ZlibDecoder::new(&packet[6..6 + compressed_len]);
@@ -569,5 +616,31 @@ mod tests {
             .read_to_end(&mut decompressed)
             .expect("zlib decode must not fail (would trigger client EOF)");
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn test_create_modchannel_signal() {
+        let packet = bytes(&create_modchannel_signal(ModChannelSignal::JoinOk, "test_chan"));
+        assert_eq!(
+            packet[0..2],
+            (ToClientCommand::ModChannelSignal as u16).to_be_bytes()
+        );
+        assert_eq!(packet[2], ModChannelSignal::JoinOk as u8);
+        // u16 length prefix (9 = "test_chan".len())
+        assert_eq!(packet[3..5], 9u16.to_be_bytes());
+        assert_eq!(&packet[5..14], b"test_chan");
+    }
+
+    #[test]
+    fn test_create_modchannel_msg() {
+        let packet = bytes(&create_modchannel_msg("chan", "hello"));
+        assert_eq!(
+            packet[0..2],
+            (ToClientCommand::ModChannelMsg as u16).to_be_bytes()
+        );
+        // u16 length prefix (4 = "chan".len()) + "chan"
+        assert_eq!(&packet[2..8], &[0x00, 0x04, b'c', b'h', b'a', b'n']);
+        // u16 length prefix (5 = "hello".len()) + "hello"
+        assert_eq!(&packet[8..15], &[0x00, 0x05, b'h', b'e', b'l', b'l', b'o']);
     }
 }

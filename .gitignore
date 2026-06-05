@@ -56,6 +56,7 @@ AppDir
 *.diff
 # GNU Patch reject file
 *.rej
+*.sqlite
 
 ## Non-static Luanti directories or symlinks to these
 /bin/

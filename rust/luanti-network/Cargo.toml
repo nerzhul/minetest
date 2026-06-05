@@ -13,11 +13,18 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 luanti-auth-db = { path = "../luanti-auth-db" }
 
-# SRP-6a (SHA-256, 2048-bit)
+# SRP-6a (SHA-256, 2048-bit) — RustCrypto PAKEs crate, RFC 5054 mode.
+# We don't need the default `getrandom` feature because we supply our own
+# server ephemeral `b` (matches Luanti's C++ srp_verifier_new() that also
+# uses externally-generated randomness).
+# Note: the srp 0.7 crate requires sha2 0.11 (digest 0.11). sha1 stays
+# at 0.10 because it is only used for legacy password translation and
+# can coexist with the newer digest version in the dep graph.
+srp = { version = "0.7.0-rc.3", default-features = false }
 num-bigint = { version = "0.4", features = ["rand"] }
 rand = "0.8"
 sha1 = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 hex = "0.4"
 

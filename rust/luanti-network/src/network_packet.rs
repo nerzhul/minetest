@@ -167,6 +167,21 @@ impl NetworkPacket {
         out
     }
 
+    /// Take ownership of the underlying payload buffer, leaving the
+    /// packet in a fresh empty state. The command is left untouched so
+    /// the caller can re-use the `NetworkPacket` to build another
+    /// response.
+    pub fn take_payload(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.data)
+    }
+
+    /// Replace the payload buffer with a pre-built one (the cursor is
+    /// reset to 0). The command is left untouched.
+    pub fn set_payload(&mut self, data: Vec<u8>) {
+        self.data = data;
+        self.read_pos = 0;
+    }
+
     /// Append raw bytes to the payload, advancing the write cursor
     /// (which is the same as the read cursor in the C++ class).
     pub fn put_raw(&mut self, src: &[u8]) {

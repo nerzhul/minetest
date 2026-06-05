@@ -163,6 +163,8 @@ pub enum ToClientCommand {
     Breath = 0x4e,
     SetSky = 0x4f,
     SrpBytesSB = 0x60,
+    ModChannelMsg = 0x57,
+    ModChannelSignal = 0x58,
 }
 
 impl ToClientCommand {
@@ -211,6 +213,8 @@ impl ToClientCommand {
             0x4e => Some(Self::Breath),
             0x4f => Some(Self::SetSky),
             0x60 => Some(Self::SrpBytesSB),
+            0x57 => Some(Self::ModChannelMsg),
+            0x58 => Some(Self::ModChannelSignal),
             _ => None,
         }
     }
@@ -260,6 +264,8 @@ impl ToClientCommand {
             Self::Breath => "TOCLIENT_BREATH",
             Self::SetSky => "TOCLIENT_SET_SKY",
             Self::SrpBytesSB => "TOCLIENT_SRP_BYTES_S_B",
+            Self::ModChannelMsg => "TOCLIENT_MODCHANNEL_MSG",
+            Self::ModChannelSignal => "TOCLIENT_MODCHANNEL_SIGNAL",
         }
     }
 
@@ -340,4 +346,72 @@ pub enum InteractAction {
     Place = 3,
     Use = 4,
     Activate = 5,
+}
+
+impl InteractAction {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::StartDigging),
+            1 => Some(Self::StopDigging),
+            2 => Some(Self::DiggingCompleted),
+            3 => Some(Self::Place),
+            4 => Some(Self::Use),
+            5 => Some(Self::Activate),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::StartDigging => "INTERACT_START_DIGGING",
+            Self::StopDigging => "INTERACT_STOP_DIGGING",
+            Self::DiggingCompleted => "INTERACT_DIGGING_COMPLETED",
+            Self::Place => "INTERACT_PLACE",
+            Self::Use => "INTERACT_USE",
+            Self::Activate => "INTERACT_ACTIVATE",
+        }
+    }
+}
+
+/// Mod channel signal types sent in `TOCLIENT_MODCHANNEL_SIGNAL`.
+///
+/// Direct port of the C++ `ModChannelSignal` enum in `src/modchannels.h`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModChannelSignal {
+    JoinOk = 0,
+    JoinFailure = 1,
+    LeaveOk = 2,
+    LeaveFailure = 3,
+    ChannelNotRegistered = 4,
+    SetState = 5,
+}
+
+impl ModChannelSignal {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::JoinOk),
+            1 => Some(Self::JoinFailure),
+            2 => Some(Self::LeaveOk),
+            3 => Some(Self::LeaveFailure),
+            4 => Some(Self::ChannelNotRegistered),
+            5 => Some(Self::SetState),
+            _ => None,
+        }
+    }
+}
+
+/// Per-player dynamic information (display size, scaling, etc.) sent by
+/// the client in `TOSERVER_UPDATE_CLIENT_INFO`.
+///
+/// Direct port of `ClientDynamicInfo` from
+/// `src/client/clientdynamicinfo.h`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ClientDynamicInfo {
+    pub render_target_size: (i32, i32),
+    pub real_gui_scaling: f32,
+    pub real_hud_scaling: f32,
+    pub max_fs_size: (i32, i32),
+    /// Added in 5.9.0. `false` on older clients.
+    pub touch_controls: bool,
 }

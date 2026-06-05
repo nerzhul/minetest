@@ -33,10 +33,8 @@ fn cmd(op: ToServerCommand) -> NetworkPacket {
 
 /// Extract the `ToClientCommand` opcode from a server-to-client packet
 /// payload (the `u16` at the front).
-fn op_of(payload: &[u8]) -> ToClientCommand {
-    let mut r = WireReader::new(payload);
-    let code = r.read_u16().unwrap();
-    ToClientCommand::from_u16(code).expect("unknown TOCLIENT opcode")
+fn op_of(payload: &NetworkPacket) -> ToClientCommand {
+    ToClientCommand::from_u16(payload.command()).expect("unknown TOCLIENT opcode")
 }
 
 #[test]
@@ -110,7 +108,7 @@ fn full_handshake() {
     assert_eq!(responses.len(), 1, "REQUEST_MEDIA should return one (empty) bunch");
     let media_pkt = &responses[0];
     assert_eq!(op_of(media_pkt), ToClientCommand::Media);
-    let mut r = WireReader::new(&media_pkt[2..]);
+    let mut r = WireReader::new(media_pkt.as_slice());
     assert_eq!(r.read_u16().unwrap(), 1, "total_bunches");
     assert_eq!(r.read_u16().unwrap(), 0, "bunch_index");
     assert_eq!(r.read_u32().unwrap(), 0, "num_files");

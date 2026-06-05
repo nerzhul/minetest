@@ -321,11 +321,15 @@ fn handle_command(
                 out.push(build_control_ack(reliable_seqnum));
             }
             for r in responses {
+                // Serialize the response NetworkPacket (command + payload)
+                // to its on-the-wire byte representation before wrapping
+                // it in an MTP Original/Reliable frame.
+                let payload = r.into_raw_bytes();
                 if force_reliable {
                     let seq = session.get_next_outgoing_seqnum();
-                    out.push(wrap_reliable(seq, &r));
+                    out.push(wrap_reliable(seq, &payload));
                 } else {
-                    out.push(wrap_original(&r));
+                    out.push(wrap_original(&payload));
                 }
             }
             out
