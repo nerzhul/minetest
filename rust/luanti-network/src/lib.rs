@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod base64_util;
+pub mod network_packet;
 pub mod opcodes;
 pub mod packet;
 pub mod protocol;
@@ -18,6 +19,7 @@ pub mod wire;
 pub use opcodes::{
     AccessDeniedCode, AuthMechanism, ToClientCommand, ToServerCommand, ToServerConnectionState,
 };
+pub use network_packet::{NetworkPacket, PacketError, PacketResult};
 pub use protocol::*;
 pub use session::{Session, SessionManager};
 pub use srp::SrpVerifier;

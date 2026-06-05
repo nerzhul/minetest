@@ -40,6 +40,11 @@ pub struct Session {
     /// Set to `true` when the client sends `TOSERVER_CLIENT_READY`.
     /// After this, the client is fully connected.
     pub client_ready: bool,
+    /// `true` if this session was just created by the call that
+    /// returned it. The next packet-processing turn is expected to
+    /// inform the client of its assigned peer id via CONTROLTYPE_SET_PEER_ID
+    /// and clear this flag.
+    pub newly_created: bool,
 }
 
 impl Session {
@@ -63,7 +68,17 @@ impl Session {
             allowed_auth_mechs: 0,
             media_loading: false,
             client_ready: false,
+            newly_created: true,
         }
+    }
+
+    /// Returns whether the session was just created by the most recent
+    /// call to `SessionManager::get_or_create_session` and clears the
+    /// flag.
+    pub fn take_newly_created(&mut self) -> bool {
+        let n = self.newly_created;
+        self.newly_created = false;
+        n
     }
 
     pub fn on_packet_received(&mut self) {
