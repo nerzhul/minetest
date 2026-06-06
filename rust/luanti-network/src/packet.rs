@@ -1,6 +1,5 @@
 // Packet structures and utilities
 
-use bytes::{Buf, BufMut, BytesMut};
 use std::collections::HashMap;
 
 use crate::protocol::*;

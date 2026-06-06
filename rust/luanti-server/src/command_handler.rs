@@ -14,17 +14,14 @@ use log::{debug, info, warn};
 
 use luanti_auth_db::AuthDatabase;
 use luanti_network::{
-    auth as auth_helpers,
-    base64_util as base64,
-    create_access_denied, create_announce_media, create_auth_accept_response,
-    create_chat_message_response, create_csm_restriction_flags, create_hello_response,
-    create_itemdef_response, create_media_bunch, create_modchannel_signal, create_movement,
-    create_nodedef_response, create_srp_bytes_s_b_response, create_time_of_day,
-    serialize_empty_itemdef, serialize_empty_nodedef,
-    srp as srp_helpers,
-    AccessDeniedCode, AuthMechanism, ClientDynamicInfo, InteractAction, MediaAnnounceEntry,
-    MediaBunchFile, ModChannelSignal, NetworkPacket, Session, SessionPhase, SrpVerifier,
-    ToServerCommand, ToServerConnectionState,
+    auth as auth_helpers, base64_util as base64, create_access_denied, create_announce_media,
+    create_auth_accept_response, create_chat_message_response, create_csm_restriction_flags,
+    create_hello_response, create_itemdef_response, create_media_bunch, create_modchannel_signal,
+    create_movement, create_nodedef_response, create_srp_bytes_s_b_response, create_time_of_day,
+    serialize_empty_itemdef, serialize_empty_nodedef, srp as srp_helpers, AccessDeniedCode,
+    AuthMechanism, ClientDynamicInfo, InteractAction, MediaAnnounceEntry, MediaBunchFile,
+    ModChannelSignal, NetworkPacket, Session, SessionPhase, SrpVerifier, ToServerCommand,
+    ToServerConnectionState,
 };
 
 use crate::frame::hex_preview;
@@ -144,8 +141,7 @@ impl CommandHandler {
         // (handlers that genuinely need `InitDone` state check
         // it themselves, e.g. `handle_init2`).
         match entry.state {
-            ToServerConnectionState::NotConnected
-            | ToServerConnectionState::Startup => {}
+            ToServerConnectionState::NotConnected | ToServerConnectionState::Startup => {}
             ToServerConnectionState::Ingame => {
                 if !session.phase.is_active() {
                     warn!(
@@ -275,9 +271,7 @@ impl CommandHandler {
             )]);
         }
 
-        if !session.create_player_on_auth_success
-            && self.auth_db.get_auth(&player_name).is_ok()
-        {
+        if !session.create_player_on_auth_success && self.auth_db.get_auth(&player_name).is_ok() {
             return Ok(vec![create_access_denied(
                 AccessDeniedCode::AlreadyConnected,
                 "Player already exists",
@@ -394,7 +388,10 @@ impl CommandHandler {
             None,
         )
         .map_err(|e| {
-            anyhow!("SRP safety check failed: {} (likely A mod N == 0 or invalid A)", e)
+            anyhow!(
+                "SRP safety check failed: {} (likely A mod N == 0 or invalid A)",
+                e
+            )
         })?;
 
         self.pending_srp.insert(
@@ -616,7 +613,10 @@ impl CommandHandler {
             DEFAULT_MOVEMENT.gravity,
         ));
         responses.push(create_time_of_day(DEFAULT_TIME_OF_DAY, DEFAULT_TIME_SPEED));
-        responses.push(create_csm_restriction_flags(CSM_RF_NONE, DEFAULT_CSM_NODE_RANGE));
+        responses.push(create_csm_restriction_flags(
+            CSM_RF_NONE,
+            DEFAULT_CSM_NODE_RANGE,
+        ));
 
         Ok(responses)
     }
@@ -717,10 +717,7 @@ impl CommandHandler {
     ) -> Result<Vec<NetworkPacket>> {
         let count = packet.read_u8()?;
         // We don't have a real map yet, so we just acknowledge.
-        debug!(
-            "GOTBLOCKS from peer {} ({} blocks)",
-            session.peer_id, count
-        );
+        debug!("GOTBLOCKS from peer {} ({} blocks)", session.peer_id, count);
         let _ = packet.rest(); // drop any remaining positions
         Ok(vec![])
     }
@@ -746,9 +743,7 @@ impl CommandHandler {
 
         info!(
             "Chat message from {} ({}): {}",
-            sender,
-            session.peer_id,
-            message
+            sender, session.peer_id, message
         );
 
         // The C++ `Client::handleCommand_ChatMessage` formats the
@@ -1080,12 +1075,7 @@ impl CommandHandler {
         }
         debug!(
             "NODEMETA_FIELDS from peer {}: pos=({},{},{}), form={:?}, {} field(s)",
-            session.peer_id,
-            x,
-            y,
-            z,
-            form_name,
-            field_count
+            session.peer_id, x, y, z, form_name, field_count
         );
         // TODO: forward to the Lua `node_on_receive_fields(p, form_name,
         // fields, playersao)` callback. Requires the script engine
@@ -1274,10 +1264,7 @@ impl CommandHandler {
     /// the stored password is split on `#`; a 4-component string with `"1"` as
     /// the second component is the SRP-encoded `#1#<salt>#<verifier>` format,
     /// otherwise if it is valid base64 it is treated as a legacy password.
-    fn determine_auth_mechanism(
-        &mut self,
-        player_name: &str,
-    ) -> Result<(u32, Option<String>)> {
+    fn determine_auth_mechanism(&mut self, player_name: &str) -> Result<(u32, Option<String>)> {
         match self.auth_db.get_auth(player_name) {
             Ok(auth_entry) => {
                 let enc_pwd = auth_entry.password.clone();
@@ -1357,7 +1344,10 @@ struct HandlerEntry {
 static HANDLER_TABLE: [Option<HandlerEntry>; luanti_network::TOSERVER_NUM_MSG_TYPES] = [
     None, // 0x00 (never used)
     None, // 0x01
-    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_init }), // 0x02
+    Some(HandlerEntry {
+        state: ToServerConnectionState::NotConnected,
+        handler: CommandHandler::handle_init,
+    }), // 0x02
     None, // 0x03
     None, // 0x04
     None, // 0x05
@@ -1372,15 +1362,27 @@ static HANDLER_TABLE: [Option<HandlerEntry>; luanti_network::TOSERVER_NUM_MSG_TY
     None, // 0x0e
     None, // 0x0f
     None, // 0x10
-    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_init2 }), // 0x11
+    Some(HandlerEntry {
+        state: ToServerConnectionState::NotConnected,
+        handler: CommandHandler::handle_init2,
+    }), // 0x11
     None, // 0x12
     None, // 0x13
     None, // 0x14
     None, // 0x15
     None, // 0x16
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_modchannel_join }), // 0x17
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_modchannel_leave }), // 0x18
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_modchannel_msg }), // 0x19
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_modchannel_join,
+    }), // 0x17
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_modchannel_leave,
+    }), // 0x18
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_modchannel_msg,
+    }), // 0x19
     None, // 0x1a
     None, // 0x1b
     None, // 0x1c
@@ -1390,9 +1392,18 @@ static HANDLER_TABLE: [Option<HandlerEntry>; luanti_network::TOSERVER_NUM_MSG_TY
     None, // 0x20
     None, // 0x21
     None, // 0x22
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_player_pos }), // 0x23
-    Some(HandlerEntry { state: ToServerConnectionState::Startup, handler: CommandHandler::handle_got_blocks }), // 0x24
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_deleted_blocks }), // 0x25
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_player_pos,
+    }), // 0x23
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Startup,
+        handler: CommandHandler::handle_got_blocks,
+    }), // 0x24
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_deleted_blocks,
+    }), // 0x25
     None, // 0x26
     None, // 0x27
     None, // 0x28
@@ -1404,25 +1415,61 @@ static HANDLER_TABLE: [Option<HandlerEntry>; luanti_network::TOSERVER_NUM_MSG_TY
     None, // 0x2e
     None, // 0x2f
     None, // 0x30
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_inventory_action }), // 0x31
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_chat_message }), // 0x32
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_inventory_action,
+    }), // 0x31
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_chat_message,
+    }), // 0x32
     None, // 0x33
     None, // 0x34
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_damage }), // 0x35
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_damage,
+    }), // 0x35
     None, // 0x36
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_player_item }), // 0x37
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_respawn_legacy }), // 0x38
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_interact }), // 0x39
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_removed_sounds }), // 0x3a
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_node_meta_fields }), // 0x3b
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_inventory_fields }), // 0x3c
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_player_item,
+    }), // 0x37
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_respawn_legacy,
+    }), // 0x38
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_interact,
+    }), // 0x39
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_removed_sounds,
+    }), // 0x3a
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_node_meta_fields,
+    }), // 0x3b
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_inventory_fields,
+    }), // 0x3c
     None, // 0x3d
     None, // 0x3e
     None, // 0x3f
-    Some(HandlerEntry { state: ToServerConnectionState::Startup, handler: CommandHandler::handle_request_media }), // 0x40
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_have_media }), // 0x41
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Startup,
+        handler: CommandHandler::handle_request_media,
+    }), // 0x40
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_have_media,
+    }), // 0x41
     None, // 0x42
-    Some(HandlerEntry { state: ToServerConnectionState::Startup, handler: CommandHandler::handle_client_ready }), // 0x43
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Startup,
+        handler: CommandHandler::handle_client_ready,
+    }), // 0x43
     None, // 0x44
     None, // 0x45
     None, // 0x46
@@ -1435,10 +1482,22 @@ static HANDLER_TABLE: [Option<HandlerEntry>; luanti_network::TOSERVER_NUM_MSG_TY
     None, // 0x4d
     None, // 0x4e
     None, // 0x4f
-    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_first_srp }), // 0x50
-    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_srp_bytes_a }), // 0x51
-    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_srp_bytes_m }), // 0x52
-    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_update_client_info }), // 0x53
+    Some(HandlerEntry {
+        state: ToServerConnectionState::NotConnected,
+        handler: CommandHandler::handle_first_srp,
+    }), // 0x50
+    Some(HandlerEntry {
+        state: ToServerConnectionState::NotConnected,
+        handler: CommandHandler::handle_srp_bytes_a,
+    }), // 0x51
+    Some(HandlerEntry {
+        state: ToServerConnectionState::NotConnected,
+        handler: CommandHandler::handle_srp_bytes_m,
+    }), // 0x52
+    Some(HandlerEntry {
+        state: ToServerConnectionState::Ingame,
+        handler: CommandHandler::handle_update_client_info,
+    }), // 0x53
 ];
 
 /// `CSM_RF_NONE` from the C++ `CSMRestrictionFlags` enum.
@@ -1636,8 +1695,7 @@ mod tests {
         p.write_u16(20);
         p.write_utf8("x");
 
-        let responses = h
-            .handle_command(&mut session, &p).unwrap();
+        let responses = h.handle_command(&mut session, &p).unwrap();
         // Should respond with access denied
         assert_eq!(responses.len(), 1);
         // The response starts with TOCLIENT_ACCESS_DENIED = 0x0A
@@ -1657,8 +1715,7 @@ mod tests {
         p.write_u16(42);
         p.write_utf8("x x"); // space is invalid
 
-        let responses = h
-            .handle_command(&mut session, &p).unwrap();
+        let responses = h.handle_command(&mut session, &p).unwrap();
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].command(), 0x0A);
     }
@@ -1676,8 +1733,7 @@ mod tests {
         // handler short-circuits with an empty media bunch — *not*
         // a hard drop.
         let p = pkt(0x0040, &[0x00, 0x00]);
-        let responses = h
-            .handle_command(&mut session, &p).unwrap();
+        let responses = h.handle_command(&mut session, &p).unwrap();
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].command(), 0x0038); // TOCLIENT_MEDIA
     }
@@ -1697,8 +1753,7 @@ mod tests {
         p.write_string(b"some-bytes");
         p.write_u8(1);
 
-        let responses = h
-            .handle_command(&mut session, &p).unwrap();
+        let responses = h.handle_command(&mut session, &p).unwrap();
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].command(), 0x0A);
     }
@@ -1716,11 +1771,10 @@ mod tests {
         p.write_u16(40);
         p.write_u16(42);
         p.write_utf8("nrz");
-        let r = h
-            .handle_command(&mut session, &p).unwrap();
+        let r = h.handle_command(&mut session, &p).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].command(), 0x0002); // TOCLIENT_HELLO
-        // C++ CS_Created --CSE_Hello--> CS_HelloSent
+                                            // C++ CS_Created --CSE_Hello--> CS_HelloSent
         assert_eq!(session.phase, SessionPhase::HelloSent);
 
         // 2. FIRST_SRP
@@ -1728,15 +1782,13 @@ mod tests {
         p.write_string(b"salt");
         p.write_string(b"verifier");
         p.write_u8(0);
-        let r = h
-            .handle_command(&mut session, &p).unwrap();
+        let r = h.handle_command(&mut session, &p).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].command(), 0x0003); // TOCLIENT_AUTH_ACCEPT
 
         // 3. INIT2
         let p = NetworkPacket::new(0x0011, 0);
-        let r = h
-            .handle_command(&mut session, &p).unwrap();
+        let r = h.handle_command(&mut session, &p).unwrap();
         // Should send ItemDef + NodeDef + AnnounceMedia + Movement +
         // TimeOfDay + CsmRestrictionFlags = 6 packets (in that
         // exact C++ order — see `handle_init2`).
@@ -1747,7 +1799,7 @@ mod tests {
         assert_eq!(r[3].command(), 0x0045); // TOCLIENT_MOVEMENT
         assert_eq!(r[4].command(), 0x0029); // TOCLIENT_TIME_OF_DAY
         assert_eq!(r[5].command(), 0x002A); // TOCLIENT_CSM_RESTRICTION_FLAGS
-        // C++ CS_InitDone --CSE_SetDefinitionsSent--> CS_DefinitionsSent
+                                            // C++ CS_InitDone --CSE_SetDefinitionsSent--> CS_DefinitionsSent
         assert_eq!(session.phase, SessionPhase::DefinitionsSent);
 
         // Re-sending INIT2 in MediaLoading phase must be a no-op
@@ -1764,8 +1816,7 @@ mod tests {
         p.write_u8(0);
         p.write_u8(0);
         p.write_utf8("5.8.0");
-        let r = h
-            .handle_command(&mut session, &p).unwrap();
+        let r = h.handle_command(&mut session, &p).unwrap();
         assert!(r.is_empty());
         assert_eq!(session.phase, SessionPhase::Active);
     }
@@ -1797,11 +1848,8 @@ mod tests {
         p.write_u8(0);
         h.handle_command(&mut session, &p).unwrap();
 
-        h.handle_command(
-            &mut session,
-            &NetworkPacket::new(0x0011, 0),
-        )
-        .unwrap();
+        h.handle_command(&mut session, &NetworkPacket::new(0x0011, 0))
+            .unwrap();
 
         let mut p = NetworkPacket::new(0x0043, 0);
         p.write_u8(5);
@@ -1818,22 +1866,21 @@ mod tests {
         let mut p = NetworkPacket::new(0x0051, 0);
         p.write_string(&vec![0u8; 256]);
         p.write_u8(1);
-        let r = h
-            .handle_command(&mut session, &p).unwrap();
+        let r = h.handle_command(&mut session, &p).unwrap();
         assert!(!r.is_empty(), "SRP_BYTES_A must be re-accepted");
 
         let r = h
-            .handle_command(
-                &mut session,
-                &NetworkPacket::new(0x0011, 0),
-            )
+            .handle_command(&mut session, &NetworkPacket::new(0x0011, 0))
             .unwrap();
         // INIT2 retransmits after Active are dropped: the C++ server
         // returns early on `client->getState() != CS_AwaitingInit2`,
         // and re-sending ITEMDEF/NODEDEF to a client whose
         // `m_mesh_update_manager` is running would crash the C++
         // client on `sanity_check(!m_mesh_update_manager->isRunning())`.
-        assert!(r.is_empty(), "INIT2 must NOT be re-processed in Active phase");
+        assert!(
+            r.is_empty(),
+            "INIT2 must NOT be re-processed in Active phase"
+        );
 
         let mut p = NetworkPacket::new(0x0043, 0);
         p.write_u8(5);
@@ -1841,8 +1888,7 @@ mod tests {
         p.write_u8(0);
         p.write_u8(0);
         p.write_utf8("5.8.0");
-        let r = h
-            .handle_command(&mut session, &p).unwrap();
+        let r = h.handle_command(&mut session, &p).unwrap();
         assert!(r.is_empty(), "CLIENT_READY is ack-only");
     }
 
@@ -1868,11 +1914,8 @@ mod tests {
         p.write_string(b"verifier");
         p.write_u8(0);
         h.handle_command(&mut session, &p).unwrap();
-        h.handle_command(
-            &mut session,
-            &NetworkPacket::new(0x0011, 0),
-        )
-        .unwrap();
+        h.handle_command(&mut session, &NetworkPacket::new(0x0011, 0))
+            .unwrap();
         assert_eq!(session.phase, SessionPhase::DefinitionsSent);
 
         // HAVE_MEDIA while in DefinitionsSent: must be dropped
@@ -1880,8 +1923,7 @@ mod tests {
         // `state < CS_Active` for an Ingame-category opcode).
         let mut p = NetworkPacket::new(0x0041, 0);
         p.write_u8(0);
-        let r = h
-            .handle_command(&mut session, &p).unwrap();
+        let r = h.handle_command(&mut session, &p).unwrap();
         assert!(r.is_empty(), "HAVE_MEDIA must be dropped pre-Active");
     }
 
@@ -1963,6 +2005,9 @@ mod tests {
         let mut p = NetworkPacket::new(0x0017, 0);
         p.write_utf8("chan");
         let r = h.handle_command(&mut session, &p).unwrap();
-        assert!(r.is_empty(), "MODCHANNEL_JOIN must be dropped in AwaitingInit2");
+        assert!(
+            r.is_empty(),
+            "MODCHANNEL_JOIN must be dropped in AwaitingInit2"
+        );
     }
 }

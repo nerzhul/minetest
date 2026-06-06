@@ -90,7 +90,10 @@ fn deleted_blocks_acked_without_response() {
     p.write_v3s16(-4, 5, -6);
 
     let r = handler.handle_command(&mut session, &p).unwrap();
-    assert!(r.is_empty(), "DELETEDBLOCKS has no response in the C++ server either");
+    assert!(
+        r.is_empty(),
+        "DELETEDBLOCKS has no response in the C++ server either"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +202,7 @@ fn interact_unknown_action_is_ignored() {
     p.write_u8(0xFE); // unknown
     p.write_u16(0);
     p.write_u32(0); // empty PointedThing (will be skipped)
-    // writePlayerPos (minimal, 38 bytes)
+                    // writePlayerPos (minimal, 38 bytes)
     p.write_v3s32(0, 0, 0);
     p.write_v3s32(0, 0, 0);
     p.write_i32(0);
@@ -344,10 +347,7 @@ fn modchannel_join_returns_join_failure_signal() {
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].command(), ToClientCommand::ModChannelSignal as u16);
     // u8 signal byte
-    assert_eq!(
-        r[0].as_slice()[0],
-        ModChannelSignal::JoinFailure as u8
-    );
+    assert_eq!(r[0].as_slice()[0], ModChannelSignal::JoinFailure as u8);
     // The channel name follows (u16 length + bytes).
     let mut rd = WireReader::new(r[0].as_slice());
     rd.read_u8().unwrap();
@@ -365,10 +365,7 @@ fn modchannel_leave_returns_leave_ok_signal() {
     let r = handler.handle_command(&mut session, &p).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].command(), ToClientCommand::ModChannelSignal as u16);
-    assert_eq!(
-        r[0].as_slice()[0],
-        ModChannelSignal::LeaveOk as u8
-    );
+    assert_eq!(r[0].as_slice()[0], ModChannelSignal::LeaveOk as u8);
 }
 
 #[test]

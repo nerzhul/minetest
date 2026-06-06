@@ -75,9 +75,7 @@ fn full_handshake() {
     first_srp.write_string(&salt);
     first_srp.write_string(&verifier);
     first_srp.write_u8(0); // is_empty = 0
-    let responses = handler
-        .handle_command(&mut session, &first_srp)
-        .unwrap();
+    let responses = handler.handle_command(&mut session, &first_srp).unwrap();
     assert_eq!(responses.len(), 1, "FIRST_SRP must produce AUTH_ACCEPT");
     assert_eq!(op_of(&responses[0]), ToClientCommand::AuthAccept);
 
@@ -88,24 +86,54 @@ fn full_handshake() {
 
     // --- Step 3: TOSERVER_INIT2 ---------------------------------------------
     let init2 = cmd(ToServerCommand::Init2);
-    let init_responses = handler
-        .handle_command(&mut session, &init2)
-        .unwrap();
-    assert_eq!(session.phase, SessionPhase::DefinitionsSent, "session should be past media loading (C++ CS_DefinitionsSent)");
+    let init_responses = handler.handle_command(&mut session, &init2).unwrap();
+    assert_eq!(
+        session.phase,
+        SessionPhase::DefinitionsSent,
+        "session should be past media loading (C++ CS_DefinitionsSent)"
+    );
 
     let opcodes: Vec<ToClientCommand> = init_responses.iter().map(|r| op_of(r)).collect();
-    assert!(opcodes.contains(&ToClientCommand::ItemDef), "missing ItemDef: {:?}", opcodes);
-    assert!(opcodes.contains(&ToClientCommand::NodeDef), "missing NodeDef: {:?}", opcodes);
-    assert!(opcodes.contains(&ToClientCommand::AnnounceMedia), "missing AnnounceMedia: {:?}", opcodes);
-    assert!(opcodes.contains(&ToClientCommand::TimeOfDay), "missing TimeOfDay: {:?}", opcodes);
-    assert!(opcodes.contains(&ToClientCommand::CsmRestrictionFlags), "missing CSM: {:?}", opcodes);
-    assert!(opcodes.contains(&ToClientCommand::Movement), "missing Movement: {:?}", opcodes);
+    assert!(
+        opcodes.contains(&ToClientCommand::ItemDef),
+        "missing ItemDef: {:?}",
+        opcodes
+    );
+    assert!(
+        opcodes.contains(&ToClientCommand::NodeDef),
+        "missing NodeDef: {:?}",
+        opcodes
+    );
+    assert!(
+        opcodes.contains(&ToClientCommand::AnnounceMedia),
+        "missing AnnounceMedia: {:?}",
+        opcodes
+    );
+    assert!(
+        opcodes.contains(&ToClientCommand::TimeOfDay),
+        "missing TimeOfDay: {:?}",
+        opcodes
+    );
+    assert!(
+        opcodes.contains(&ToClientCommand::CsmRestrictionFlags),
+        "missing CSM: {:?}",
+        opcodes
+    );
+    assert!(
+        opcodes.contains(&ToClientCommand::Movement),
+        "missing Movement: {:?}",
+        opcodes
+    );
 
     // --- Step 4: TOSERVER_REQUEST_MEDIA -------------------------------------
     let mut req = cmd(ToServerCommand::RequestMedia);
     req.write_u16(0); // 0 files requested
     let responses = handler.handle_command(&mut session, &req).unwrap();
-    assert_eq!(responses.len(), 1, "REQUEST_MEDIA should return one (empty) bunch");
+    assert_eq!(
+        responses.len(),
+        1,
+        "REQUEST_MEDIA should return one (empty) bunch"
+    );
     let media_pkt = &responses[0];
     assert_eq!(op_of(media_pkt), ToClientCommand::Media);
     let mut r = WireReader::new(media_pkt.as_slice());

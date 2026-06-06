@@ -104,6 +104,8 @@ pub trait AuthDatabase {
     fn reload(&self) -> Result<()>;
 }
 
+pub mod memory;
+
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 

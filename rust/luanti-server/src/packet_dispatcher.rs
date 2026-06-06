@@ -65,11 +65,7 @@ impl PacketDispatcher {
 
     /// Process a single UDP datagram and return the response datagrams
     /// to send back to `peer_addr`.
-    pub fn handle_datagram(
-        &mut self,
-        data: &[u8],
-        peer_addr: SocketAddr,
-    ) -> Result<Vec<Vec<u8>>> {
+    pub fn handle_datagram(&mut self, data: &[u8], peer_addr: SocketAddr) -> Result<Vec<Vec<u8>>> {
         if data.len() < BASE_HEADER_SIZE {
             warn!("Packet too small from {}: {} bytes", peer_addr, data.len());
             return Ok(vec![]);
@@ -153,11 +149,7 @@ impl PacketDispatcher {
 // block so the borrow checker can see the disjoint borrows of the
 // SessionManager and CommandHandler fields of `PacketDispatcher`.
 
-fn handle_control(
-    session: &mut Session,
-    data: &[u8],
-    peer_addr: SocketAddr,
-) -> Vec<Vec<u8>> {
+fn handle_control(session: &mut Session, data: &[u8], peer_addr: SocketAddr) -> Vec<Vec<u8>> {
     // `data` has already had the MTP type byte stripped, so
     // `data[0]` is the control sub-type.
     if data.is_empty() {
@@ -314,7 +306,7 @@ fn handle_command(
 
     session.on_packet_received();
 
-        match commands.handle_command(session, &packet) {
+    match commands.handle_command(session, &packet) {
         Ok(responses) => {
             let mut out = Vec::with_capacity(responses.len() + 1);
             if force_reliable {
@@ -400,8 +392,8 @@ mod tests {
         datagram[6] = 1;
         datagram.push(PacketType::Reliable as u8);
         datagram.extend_from_slice(&0xFFFBu16.to_be_bytes()); // seqnum
-        // C++ MTP wraps every non-raw reliable command in an Original
-        // envelope, so the wire includes an inner type byte.
+                                                              // C++ MTP wraps every non-raw reliable command in an Original
+                                                              // envelope, so the wire includes an inner type byte.
         datagram.push(PacketType::Original as u8);
         datagram.extend_from_slice(&init_cmd);
 
@@ -412,8 +404,11 @@ mod tests {
         assert_eq!(responses[2][7], PacketType::Reliable as u8);
         // The C++ MTP double-wraps every reliable send, so the
         // response wire is [base][0x03][seqnum(2)][0x01][command(2)]...
-        assert_eq!(responses[2][10], PacketType::Original as u8,
-            "reliable response must include inner Original type byte for C++ client");
+        assert_eq!(
+            responses[2][10],
+            PacketType::Original as u8,
+            "reliable response must include inner Original type byte for C++ client"
+        );
         let cmd = u16::from_be_bytes([responses[2][11], responses[2][12]]);
         assert_eq!(cmd, 0x0002, "expected TOCLIENT_HELLO (0x0002)");
 
@@ -443,8 +438,11 @@ mod tests {
         assert_eq!(responses[0][7], PacketType::Control as u8);
         assert_eq!(responses[0][8], ControlType::Ack as u8);
         assert_eq!(responses[1][7], PacketType::Reliable as u8);
-        assert_eq!(responses[1][10], PacketType::Original as u8,
-            "reliable response must include inner Original type byte for C++ client");
+        assert_eq!(
+            responses[1][10],
+            PacketType::Original as u8,
+            "reliable response must include inner Original type byte for C++ client"
+        );
         let cmd = u16::from_be_bytes([responses[1][11], responses[1][12]]);
         assert_eq!(cmd, 0x000A, "expected TOCLIENT_ACCESS_DENIED (0x000A)");
     }
@@ -531,7 +529,8 @@ mod tests {
         // Reliable responses are double-wrapped by `wrap_reliable`:
         // [base][0x03][seqnum(2)][0x01 Original][command(2)]...
         assert_eq!(
-            responses[1][10], PacketType::Original as u8,
+            responses[1][10],
+            PacketType::Original as u8,
             "reliable response must include inner Original type byte for C++ client"
         );
         let cmd = u16::from_be_bytes([responses[1][11], responses[1][12]]);
