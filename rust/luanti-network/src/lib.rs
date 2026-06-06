@@ -17,8 +17,10 @@ pub mod wire;
 
 // Re-export commonly used types
 pub use opcodes::{
-    AccessDeniedCode, AuthMechanism, ClientDynamicInfo, InteractAction, ModChannelSignal,
-    ToClientCommand, ToServerCommand, ToServerConnectionState,
+    lookup_to_client_command, lookup_to_server_command, AccessDeniedCode, AuthMechanism,
+    ClientDynamicInfo, InteractAction, ModChannelSignal, ToClientCommand, ToClientCommandSpec,
+    ToServerCommand, ToServerCommandSpec, ToServerConnectionState, TOCLIENT_NUM_MSG_TYPES,
+    TOSERVER_NUM_MSG_TYPES,
 };
 pub use network_packet::{NetworkPacket, PacketError, PacketResult};
 pub use protocol::*;

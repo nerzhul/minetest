@@ -19,7 +19,6 @@ use luanti_auth_db::sqlite::AuthDatabaseSqlite;
 use luanti_auth_db::AuthDatabase;
 use luanti_network::{
     auth, wire::WireReader, NetworkPacket, SessionPhase, ToClientCommand, ToServerCommand,
-    ToServerConnectionState,
 };
 use luanti_server::command_handler::CommandHandler;
 use tempfile::TempDir;
@@ -55,11 +54,12 @@ fn full_handshake() {
     init.write_u16(43); // max_proto
     init.write_utf8("alice");
 
-    let responses = handler.handle_command(&mut session, &init, peer).unwrap();
+    let responses = handler.handle_command(&mut session, &init).unwrap();
     assert_eq!(responses.len(), 1, "INIT must produce exactly one response");
     let hello = &responses[0];
     assert_eq!(op_of(hello), ToClientCommand::Hello);
-    assert_eq!(session.connection_state, ToServerConnectionState::Startup);
+    // C++ CS_Created --CSE_Hello--> CS_HelloSent
+    assert_eq!(session.phase, SessionPhase::HelloSent);
     assert_eq!(session.player_name.as_deref(), Some("alice"));
 
     // --- Step 2: TOSERVER_FIRST_SRP -----------------------------------------
@@ -76,7 +76,7 @@ fn full_handshake() {
     first_srp.write_string(&verifier);
     first_srp.write_u8(0); // is_empty = 0
     let responses = handler
-        .handle_command(&mut session, &first_srp, peer)
+        .handle_command(&mut session, &first_srp)
         .unwrap();
     assert_eq!(responses.len(), 1, "FIRST_SRP must produce AUTH_ACCEPT");
     assert_eq!(op_of(&responses[0]), ToClientCommand::AuthAccept);
@@ -89,9 +89,9 @@ fn full_handshake() {
     // --- Step 3: TOSERVER_INIT2 ---------------------------------------------
     let init2 = cmd(ToServerCommand::Init2);
     let init_responses = handler
-        .handle_command(&mut session, &init2, peer)
+        .handle_command(&mut session, &init2)
         .unwrap();
-    assert_eq!(session.phase, SessionPhase::MediaLoading, "session should be in media-loading phase");
+    assert_eq!(session.phase, SessionPhase::DefinitionsSent, "session should be past media loading (C++ CS_DefinitionsSent)");
 
     let opcodes: Vec<ToClientCommand> = init_responses.iter().map(|r| op_of(r)).collect();
     assert!(opcodes.contains(&ToClientCommand::ItemDef), "missing ItemDef: {:?}", opcodes);
@@ -104,7 +104,7 @@ fn full_handshake() {
     // --- Step 4: TOSERVER_REQUEST_MEDIA -------------------------------------
     let mut req = cmd(ToServerCommand::RequestMedia);
     req.write_u16(0); // 0 files requested
-    let responses = handler.handle_command(&mut session, &req, peer).unwrap();
+    let responses = handler.handle_command(&mut session, &req).unwrap();
     assert_eq!(responses.len(), 1, "REQUEST_MEDIA should return one (empty) bunch");
     let media_pkt = &responses[0];
     assert_eq!(op_of(media_pkt), ToClientCommand::Media);
@@ -116,7 +116,7 @@ fn full_handshake() {
     // --- Step 5: TOSERVER_HAVE_MEDIA ----------------------------------------
     let mut have = cmd(ToServerCommand::HaveMedia);
     have.write_u8(0); // 0 tokens
-    let responses = handler.handle_command(&mut session, &have, peer).unwrap();
+    let responses = handler.handle_command(&mut session, &have).unwrap();
     assert!(responses.is_empty(), "HAVE_MEDIA has no response");
 
     // --- Step 6: TOSERVER_CLIENT_READY --------------------------------------
@@ -126,10 +126,9 @@ fn full_handshake() {
     ready.write_u8(0); // patch
     ready.write_u8(0); // reserved
     ready.write_utf8("5.9.0");
-    let responses = handler.handle_command(&mut session, &ready, peer).unwrap();
+    let responses = handler.handle_command(&mut session, &ready).unwrap();
     assert!(responses.is_empty(), "CLIENT_READY has no response");
     assert_eq!(session.phase, SessionPhase::Active);
-    assert_eq!(session.connection_state, ToServerConnectionState::Ingame);
 }
 
 #[test]
@@ -150,7 +149,7 @@ fn init_rejects_invalid_name() {
     init.write_u16(43);
     init.write_utf8("bad name");
 
-    let responses = handler.handle_command(&mut session, &init, peer).unwrap();
+    let responses = handler.handle_command(&mut session, &init).unwrap();
     assert_eq!(responses.len(), 1);
     assert_eq!(op_of(&responses[0]), ToClientCommand::AccessDenied);
 }
@@ -172,13 +171,19 @@ fn init_rejects_wrong_version() {
     init.write_u16(5); // max_proto  -- too old
     init.write_utf8("bob");
 
-    let responses = handler.handle_command(&mut session, &init, peer).unwrap();
+    let responses = handler.handle_command(&mut session, &init).unwrap();
     assert_eq!(responses.len(), 1);
     assert_eq!(op_of(&responses[0]), ToClientCommand::AccessDenied);
 }
 
 #[test]
-fn media_commands_rejected_before_init2() {
+fn request_media_accepted_before_init2() {
+    // REQUEST_MEDIA is a `Startup`-category opcode in the C++ table
+    // (`TOSERVER_STATE_STARTUP`), so `Server::ProcessData` accepts
+    // it unconditionally. The Rust port mirrors that: the gate
+    // does not reject it, the handler short-circuits with a single
+    // empty TOCLIENT_MEDIA bunch (the server has no media
+    // registered yet, but it still acknowledges the request).
     let tmp = TempDir::new().unwrap();
     let auth_db = AuthDatabaseSqlite::new(tmp.path()).unwrap();
     let mut handler = CommandHandler::new(37, 43, Box::new(auth_db));
@@ -193,16 +198,19 @@ fn media_commands_rejected_before_init2() {
     init.write_u16(37);
     init.write_u16(43);
     init.write_utf8("carol");
-    let _ = handler.handle_command(&mut session, &init, peer).unwrap();
+    let _ = handler.handle_command(&mut session, &init).unwrap();
 
-    // Now REQUEST_MEDIA should be rejected (not in media_loading phase)
+    // REQUEST_MEDIA is accepted regardless of phase (Startup
+    // category is early-returned in `Server::ProcessData`).
     let mut req = cmd(ToServerCommand::RequestMedia);
     req.write_u16(0);
-    let responses = handler.handle_command(&mut session, &req, peer).unwrap();
-    assert!(
-        responses.is_empty(),
-        "REQUEST_MEDIA before INIT2 should produce no response"
-    );
+    let responses = handler.handle_command(&mut session, &req).unwrap();
+    assert_eq!(responses.len(), 1);
+    assert_eq!(op_of(&responses[0]), ToClientCommand::Media);
+    let mut r = WireReader::new(responses[0].as_slice());
+    assert_eq!(r.read_u16().unwrap(), 1, "total_bunches");
+    assert_eq!(r.read_u16().unwrap(), 0, "bunch_index");
+    assert_eq!(r.read_u32().unwrap(), 0, "num_files");
 }
 
 #[test]
@@ -221,14 +229,14 @@ fn srp_bytes_a_rejects_disallowed_mech() {
     init.write_u16(37);
     init.write_u16(43);
     init.write_utf8("dave");
-    let _ = handler.handle_command(&mut session, &init, peer).unwrap();
+    let _ = handler.handle_command(&mut session, &init).unwrap();
 
     // After INIT, the server only allows FIRST_SRP (new user).
     // Send SRP_BYTES_A with based_on=0 (legacy) - should be rejected.
     let mut a = cmd(ToServerCommand::SrpBytesA);
     a.write_string(&vec![0u8; 256]);
     a.write_u8(0); // based_on=0 (legacy)
-    let responses = handler.handle_command(&mut session, &a, peer).unwrap();
+    let responses = handler.handle_command(&mut session, &a).unwrap();
     assert_eq!(responses.len(), 1);
     assert_eq!(op_of(&responses[0]), ToClientCommand::AccessDenied);
 }

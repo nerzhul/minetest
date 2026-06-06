@@ -12,9 +12,7 @@
 use std::io::Write;
 
 use crate::network_packet::NetworkPacket;
-use crate::opcodes::{
-    AccessDeniedCode, ModChannelSignal, ToClientCommand,
-};
+use crate::opcodes::{AccessDeniedCode, ModChannelSignal, ToClientCommand};
 
 /// Create TOCLIENT_HELLO response
 ///
@@ -49,7 +47,10 @@ pub fn create_hello_response(
 /// * `salt` - The per-user salt
 /// * `bytes_b` - The server's B value (256 bytes for 2048-bit SRP)
 pub fn create_srp_bytes_s_b_response(salt: &[u8], bytes_b: &[u8]) -> NetworkPacket {
-    let mut p = NetworkPacket::new(ToClientCommand::SrpBytesSB as u16, 2 + salt.len() + 2 + bytes_b.len());
+    let mut p = NetworkPacket::new(
+        ToClientCommand::SrpBytesSB as u16,
+        2 + salt.len() + 2 + bytes_b.len(),
+    );
     p.write_string(salt);
     p.write_string(bytes_b);
     p
@@ -96,26 +97,55 @@ pub fn create_auth_accept_response(
 /// * `code` - The denial reason code
 /// * `message` - Human-readable message explaining the denial
 pub fn create_access_denied(code: AccessDeniedCode, message: &str) -> NetworkPacket {
-    let mut p = NetworkPacket::new(ToClientCommand::AccessDenied as u16, 1 + 2 + message.len() + 1);
+    let mut p = NetworkPacket::new(
+        ToClientCommand::AccessDenied as u16,
+        1 + 2 + message.len() + 1,
+    );
     p.write_u8(code as u8);
     p.write_utf8(message);
     p.write_u8(0); // reconnect
     p
 }
 
-/// Create TOCLIENT_CHAT_MESSAGE response
+/// Create `TOCLIENT_CHAT_MESSAGE` (0x2F) — a chat message sent to the
+/// client.
 ///
-/// This packet sends a chat message to the client. The message is encoded in UTF-16
-/// as per the protocol specification.
+/// Wire format (matches `Server::SendChatMessage` in
+/// [`src/server.cpp`](../../../../src/server.cpp) and
+/// `Client::handleCommand_ChatMessage` in
+/// [`src/network/clientpackethandler.cpp`](../../../../src/network/clientpackethandler.cpp)):
+///
+/// ```text
+/// [0]    u8   version            (must be 1; older clients used version 0)
+/// [1]    u8   message_type       (0 = normal, 1 = system, 2 = announce…)
+/// [2]    u16  sendername_char_count
+/// [..]   wstring sendername     (BE u16 chars, the player name, or "" for system)
+/// [..]   u16  message_char_count
+/// [..]   wstring message        (BE u16 chars, the actual chat content)
+/// [..]   u64  timestamp          (seconds since the Unix epoch)
+/// ```
+///
+/// The client formats the displayed line itself (typically
+/// `"<sender> message"`); the server must NOT pre-format the
+/// `<sender> ` prefix into the message field — that would render
+/// as `"<sender> <sender> message"` on the client. Pass the raw
+/// player name as `sender` and the raw chat text as `message`.
+///
+/// `timestamp` is the wall-clock time the message was generated
+/// (seconds since the Unix epoch). The client uses it for ordering
+/// and to debounce replays.
 ///
 /// # Arguments
-/// * `message` - The message text to send
-pub fn create_chat_message_response(message: &str) -> NetworkPacket {
+/// * `sender`    — the player name (or `""` for system messages).
+/// * `message`   — the raw chat text (no `<sender> ` prefix).
+/// * `timestamp` — Unix epoch seconds, as a `u64`.
+pub fn create_chat_message_response(sender: &str, message: &str, timestamp: u64) -> NetworkPacket {
     let mut p = NetworkPacket::new(ToClientCommand::ChatMessage as u16, 0);
     p.write_u8(1); // version
     p.write_u8(0); // message type (normal)
-    p.write_wstring(""); // sender name
+    p.write_wstring(sender);
     p.write_wstring(message);
+    p.write_u64(timestamp);
     p
 }
 
@@ -399,7 +429,10 @@ pub fn create_movement(
 /// * `signal` - the kind of signal to send
 /// * `channel_name` - the channel name the signal refers to
 pub fn create_modchannel_signal(signal: ModChannelSignal, channel_name: &str) -> NetworkPacket {
-    let mut p = NetworkPacket::new(ToClientCommand::ModChannelSignal as u16, 1 + 2 + channel_name.len());
+    let mut p = NetworkPacket::new(
+        ToClientCommand::ModChannelSignal as u16,
+        1 + 2 + channel_name.len(),
+    );
     p.write_u8(signal as u8);
     p.write_utf8(channel_name);
     p
@@ -414,7 +447,10 @@ pub fn create_modchannel_signal(signal: ModChannelSignal, channel_name: &str) ->
 /// std::string channel_msg
 /// ```
 pub fn create_modchannel_msg(channel_name: &str, channel_msg: &str) -> NetworkPacket {
-    let mut p = NetworkPacket::new(ToClientCommand::ModChannelMsg as u16, 2 + channel_name.len() + 2 + channel_msg.len());
+    let mut p = NetworkPacket::new(
+        ToClientCommand::ModChannelMsg as u16,
+        2 + channel_name.len() + 2 + channel_msg.len(),
+    );
     p.write_utf8(channel_name);
     p.write_utf8(channel_msg);
     p
@@ -492,7 +528,10 @@ mod tests {
 
     #[test]
     fn test_create_access_denied() {
-        let packet = bytes(&create_access_denied(AccessDeniedCode::WrongVersion, "Test message"));
+        let packet = bytes(&create_access_denied(
+            AccessDeniedCode::WrongVersion,
+            "Test message",
+        ));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::AccessDenied as u16).to_be_bytes()
@@ -502,13 +541,48 @@ mod tests {
 
     #[test]
     fn test_create_chat_message_response() {
-        let packet = bytes(&create_chat_message_response("Hello"));
+        // Wire layout: u8 version | u8 type | u16 sender_char_count |
+        // wstring sender (BE u16 chars) | u16 message_char_count |
+        // wstring message (BE u16 chars) | u64 timestamp.
+        let ts: u64 = 1_700_000_000;
+        let packet = bytes(&create_chat_message_response("nrz", "Hello", ts));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::ChatMessage as u16).to_be_bytes()
         );
         assert_eq!(packet[2], 1); // version
         assert_eq!(packet[3], 0); // message type
+
+        // sender: u16 char count (3 chars for "nrz") + 6 bytes BE u16
+        assert_eq!(&packet[4..6], &3u16.to_be_bytes());
+        let sender_bytes = &packet[6..12];
+        let sender = String::from_utf16(
+            &sender_bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(sender, "nrz");
+
+        // message: u16 char count (5 chars for "Hello") + 10 bytes BE u16
+        assert_eq!(&packet[12..14], &5u16.to_be_bytes());
+        let message_bytes = &packet[14..24];
+        let message = String::from_utf16(
+            &message_bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(message, "Hello");
+
+        // timestamp: u64 BE
+        let ts_offset = packet.len() - 8;
+        assert_eq!(
+            u64::from_be_bytes(packet[ts_offset..].try_into().unwrap()),
+            ts
+        );
     }
 
     #[test]
@@ -542,10 +616,17 @@ mod tests {
         );
         // The long string is u32 length (4 bytes) + compressed data.
         // Total packet = 2 (cmd) + 4 (len) + compressed payload.
-        let compressed_len = u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]])
-            as usize;
-        assert_eq!(compressed_len, packet.len() - 6, "long string length must match payload");
-        assert!(compressed_len > 0, "compressed payload must be non-empty (was 0 → client EOF)");
+        let compressed_len =
+            u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]]) as usize;
+        assert_eq!(
+            compressed_len,
+            packet.len() - 6,
+            "long string length must match payload"
+        );
+        assert!(
+            compressed_len > 0,
+            "compressed payload must be non-empty (was 0 → client EOF)"
+        );
         // zlib magic: 0x78 xx
         assert_eq!(packet[6], 0x78, "expected zlib CMF byte");
     }
@@ -557,8 +638,8 @@ mod tests {
             packet[0..2],
             (ToClientCommand::NodeDef as u16).to_be_bytes()
         );
-        let compressed_len = u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]])
-            as usize;
+        let compressed_len =
+            u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]]) as usize;
         assert_eq!(compressed_len, packet.len() - 6);
         assert!(compressed_len > 0);
         assert_eq!(packet[6], 0x78, "expected zlib CMF byte");
@@ -573,8 +654,8 @@ mod tests {
             packet[0..2],
             (ToClientCommand::ItemDef as u16).to_be_bytes()
         );
-        let compressed_len = u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]])
-            as usize;
+        let compressed_len =
+            u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]]) as usize;
         assert_eq!(compressed_len, packet.len() - 6);
         assert!(compressed_len > 0);
         assert_eq!(
@@ -591,8 +672,8 @@ mod tests {
             packet[0..2],
             (ToClientCommand::NodeDef as u16).to_be_bytes()
         );
-        let compressed_len = u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]])
-            as usize;
+        let compressed_len =
+            u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]]) as usize;
         assert_eq!(compressed_len, packet.len() - 6);
         assert!(compressed_len > 0);
         assert_eq!(&packet[6..10], &[0x28, 0xB5, 0x2F, 0xFD]);
@@ -608,8 +689,8 @@ mod tests {
 
         let original = serialize_empty_itemdef();
         let packet = bytes(&create_itemdef_response(&original, 42));
-        let compressed_len = u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]])
-            as usize;
+        let compressed_len =
+            u32::from_be_bytes([packet[2], packet[3], packet[4], packet[5]]) as usize;
         let mut decoder = ZlibDecoder::new(&packet[6..6 + compressed_len]);
         let mut decompressed = Vec::new();
         decoder
@@ -620,7 +701,10 @@ mod tests {
 
     #[test]
     fn test_create_modchannel_signal() {
-        let packet = bytes(&create_modchannel_signal(ModChannelSignal::JoinOk, "test_chan"));
+        let packet = bytes(&create_modchannel_signal(
+            ModChannelSignal::JoinOk,
+            "test_chan",
+        ));
         assert_eq!(
             packet[0..2],
             (ToClientCommand::ModChannelSignal as u16).to_be_bytes()

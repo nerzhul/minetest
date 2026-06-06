@@ -11,7 +11,6 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, info, warn};
-use std::net::SocketAddr;
 
 use luanti_auth_db::AuthDatabase;
 use luanti_network::{
@@ -84,11 +83,15 @@ impl CommandHandler {
     /// per `ToClientCommand` we want to send back). The dispatcher
     /// serializes each one to bytes and wraps it in an MTP
     /// `Original` or `Reliable` frame.
+    ///
+    /// The peer's `SocketAddr` is read from `session.address` rather
+    /// than passed as a parameter — the C++ `Server` reaches it via
+    /// `m_con->GetPeerAddress(peer_id)`, in our port the address is
+    /// stored on the `Session` itself at creation time.
     pub fn handle_command(
         &mut self,
         session: &mut Session,
         packet: &NetworkPacket,
-        peer_addr: SocketAddr,
     ) -> Result<Vec<NetworkPacket>> {
         let cmd = ToServerCommand::from_u16(packet.command());
         let Some(cmd) = cmd else {
@@ -96,7 +99,7 @@ impl CommandHandler {
             warn!(
                 "Unknown command 0x{:04x} from {} (peer {}, {} bytes payload: {}{})",
                 packet.command(),
-                peer_addr,
+                session.address,
                 session.peer_id,
                 packet.len(),
                 preview,
@@ -105,15 +108,57 @@ impl CommandHandler {
             return Ok(vec![]);
         };
 
-        debug!("Processing command {} from {}", cmd, peer_addr);
+        debug!("Processing command {} from {}", cmd, session.address);
 
-        // Check if session state allows this command
-        if !self.check_command_state(session, cmd) {
-            warn!(
-                "Command {} not allowed in current state {:?} from {}",
-                cmd, session.connection_state, peer_addr
-            );
-            return Ok(vec![]);
+        // Look up the dispatch entry (handler + state category).
+        // Mirrors the C++ `toServerCommandTable[command]` lookup in
+        // `Server::ProcessData` — the C++ struct carries both
+        // `state` and `handler`, so a single array access gives
+        // us everything we need.
+        let entry = HANDLER_TABLE[cmd as usize]
+            .expect("cmd is a valid ToServerCommand variant with a handler");
+
+        // Category-based filter, mirroring the C++ gate in
+        // `Server::ProcessData`
+        // ([`src/server.cpp:1342-1368`](../../../../src/server.cpp)):
+        //
+        // ```text
+        //   if (opcode.state == NOT_CONNECTED) handle();   // no state check
+        //   if (opcode.state == STARTUP)       handle();   // no state check
+        //   if (state < CS_Active)             drop();     // INGAME
+        //   handle();
+        // ```
+        //
+        // The C++ unconditionally accepts `NotConnected` and
+        // `Startup` opcodes (the latter via an early-return on
+        // `toServerCommandTable[command].state == TOSERVER_STATE_STARTUP`,
+        // with no `getClientState(peer_id)` check) and only
+        // consults the per-client state for `Ingame`. We mirror
+        // that exactly: `Startup` runs in every state the
+        // C++ would accept, including the
+        // `Created`/`HelloSent`/`AwaitingInit2` sub-states. The
+        // C++ additionally asserts `getClient(peer_id,
+        // CS_InitDone)` on the path used by `Startup` opcodes,
+        // which would crash the server if a `Startup` opcode were
+        // ever received before `INIT2`; the Rust does not assert
+        // (handlers that genuinely need `InitDone` state check
+        // it themselves, e.g. `handle_init2`).
+        match entry.state {
+            ToServerConnectionState::NotConnected
+            | ToServerConnectionState::Startup => {}
+            ToServerConnectionState::Ingame => {
+                if !session.phase.is_active() {
+                    warn!(
+                        "Command {} not allowed in current phase {:?} from {}",
+                        cmd, session.phase, session.address
+                    );
+                    return Ok(vec![]);
+                }
+            }
+            // The C++ `TOSERVER_STATE_ALL` sentinel is reserved for
+            // the null-command handler and never matches a real
+            // opcode. Reject defensively if it ever does.
+            ToServerConnectionState::All => return Ok(vec![]),
         }
 
         // Each handler takes a fresh clone of the packet so the read
@@ -121,55 +166,7 @@ impl CommandHandler {
         // is just a Vec<u8> + usize + two u16s).
         let mut pkt = packet.clone();
 
-        match cmd {
-            ToServerCommand::Init => self.handle_init(session, &mut pkt, peer_addr),
-            ToServerCommand::Init2 => self.handle_init2(session, &mut pkt, peer_addr),
-            ToServerCommand::ModChannelJoin => self.handle_modchannel_join(session, &mut pkt),
-            ToServerCommand::ModChannelLeave => self.handle_modchannel_leave(session, &mut pkt),
-            ToServerCommand::ModChannelMsg => self.handle_modchannel_msg(session, &mut pkt),
-            ToServerCommand::PlayerPos => self.handle_player_pos(session, &pkt),
-            ToServerCommand::GotBlocks => self.handle_got_blocks(session, &mut pkt),
-            ToServerCommand::DeletedBlocks => self.handle_deleted_blocks(session, &mut pkt),
-            ToServerCommand::InventoryAction => self.handle_inventory_action(session, &mut pkt),
-            ToServerCommand::ChatMessage => self.handle_chat_message(session, &mut pkt),
-            ToServerCommand::Damage => self.handle_damage(session, &mut pkt),
-            ToServerCommand::PlayerItem => self.handle_player_item(session, &mut pkt),
-            ToServerCommand::RespawnLegacy => self.handle_respawn_legacy(session, &mut pkt),
-            ToServerCommand::Interact => self.handle_interact(session, &mut pkt, peer_addr),
-            ToServerCommand::RemovedSounds => self.handle_removed_sounds(session, &mut pkt),
-            ToServerCommand::NodeMetaFields => self.handle_node_meta_fields(session, &mut pkt),
-            ToServerCommand::InventoryFields => self.handle_inventory_fields(session, &mut pkt),
-            ToServerCommand::RequestMedia => {
-                self.handle_request_media(session, &mut pkt, peer_addr)
-            }
-            ToServerCommand::HaveMedia => self.handle_have_media(session, &mut pkt, peer_addr),
-            ToServerCommand::ClientReady => self.handle_client_ready(session, &mut pkt),
-            ToServerCommand::FirstSrp => self.handle_first_srp(session, &mut pkt, peer_addr),
-            ToServerCommand::SrpBytesA => self.handle_srp_bytes_a(session, &mut pkt, peer_addr),
-            ToServerCommand::SrpBytesM => self.handle_srp_bytes_m(session, &mut pkt, peer_addr),
-            ToServerCommand::UpdateClientInfo => self.handle_update_client_info(session, &mut pkt),
-        }
-    }
-
-    /// Check if command is allowed in current session state.
-    fn check_command_state(&self, session: &Session, cmd: ToServerCommand) -> bool {
-        // Special case: media-loading commands are only allowed once the
-        // session has reached the `MediaLoading` or `Active` phase (i.e.
-        // TOSERVER_INIT2 has been processed).
-        if matches!(
-            cmd,
-            ToServerCommand::RequestMedia
-                | ToServerCommand::HaveMedia
-                | ToServerCommand::GotBlocks
-                | ToServerCommand::DeletedBlocks
-                | ToServerCommand::ClientReady
-        ) {
-            return std::mem::discriminant(&cmd.required_state())
-                == std::mem::discriminant(&session.connection_state)
-                && session.phase != SessionPhase::Init;
-        }
-        std::mem::discriminant(&cmd.required_state())
-            == std::mem::discriminant(&session.connection_state)
+        (entry.handler)(self, session, &mut pkt)
     }
 
     // ------------------------------------------------------------------
@@ -181,7 +178,6 @@ impl CommandHandler {
         &mut self,
         session: &mut Session,
         packet: &mut NetworkPacket,
-        peer_addr: SocketAddr,
     ) -> Result<Vec<NetworkPacket>> {
         // TOSERVER_INIT:
         //   u8  serialization_version (= SER_FMT_VER_HIGHEST_READ)
@@ -197,13 +193,13 @@ impl CommandHandler {
 
         info!(
             "Client {} INIT: ser_ver={}, proto={}-{}, name='{}'",
-            peer_addr, client_ser_ver, min_proto, max_proto, player_name
+            session.address, client_ser_ver, min_proto, max_proto, player_name
         );
 
         if !auth_helpers::is_valid_player_name(&player_name) {
             warn!(
                 "Player with invalid name '{}' tried to connect from {}",
-                player_name, peer_addr
+                player_name, session.address
             );
             return Ok(vec![create_access_denied(
                 AccessDeniedCode::WrongCharsInName,
@@ -214,7 +210,7 @@ impl CommandHandler {
         let negotiated_ser_ver = std::cmp::min(client_ser_ver, SER_FMT_VER_HIGHEST_WRITE);
         let negotiated_proto = std::cmp::min(max_proto, self.max_protocol_version);
         if negotiated_proto < self.min_protocol_version || negotiated_proto < min_proto {
-            warn!("Protocol version mismatch with {}", peer_addr);
+            warn!("Protocol version mismatch with {}", session.address);
             return Ok(vec![create_access_denied(
                 AccessDeniedCode::WrongVersion,
                 "Protocol version mismatch",
@@ -230,12 +226,14 @@ impl CommandHandler {
         session.allowed_auth_mechs = auth_mechs;
         session.chosen_mech = AuthMechanism::None as u32;
         session.create_player_on_auth_success = false;
-        session.phase = SessionPhase::Init;
-        session.connection_state = ToServerConnectionState::Startup;
+        // C++ CSE_Hello after sending TOCLIENT_HELLO
+        // (Server::acceptAuth in src/server.cpp:266):
+        //   CS_Created --CSE_Hello--> CS_HelloSent
+        session.phase = SessionPhase::HelloSent;
 
         debug!(
             "Negotiated with {}: ser_ver={}, proto={}",
-            peer_addr, negotiated_ser_ver, negotiated_proto
+            session.address, negotiated_ser_ver, negotiated_proto
         );
 
         Ok(vec![create_hello_response(
@@ -252,7 +250,6 @@ impl CommandHandler {
         &mut self,
         session: &mut Session,
         packet: &mut NetworkPacket,
-        peer_addr: SocketAddr,
     ) -> Result<Vec<NetworkPacket>> {
         let salt = packet.read_string()?;
         let verifier = packet.read_string()?;
@@ -260,7 +257,7 @@ impl CommandHandler {
 
         info!(
             "FIRST_SRP from {}: is_empty={}, salt_len={}, verifier_len={}",
-            peer_addr,
+            session.address,
             is_empty,
             salt.len(),
             verifier.len()
@@ -310,8 +307,13 @@ impl CommandHandler {
         }
 
         session.enc_pwd = Some(enc_pwd);
-        // Stays in Startup, the client must follow up with INIT2 once
-        // it receives AUTH_ACCEPT.
+        // C++ CSE_AuthAccept after sending TOCLIENT_AUTH_ACCEPT
+        // (Server::Server::handleCommand_FirstSrp... actually
+        // Server::acceptAuth, src/server.cpp:3100):
+        //   CS_HelloSent --CSE_AuthAccept--> CS_AwaitingInit2
+        // The client must follow up with INIT2 once it receives
+        // AUTH_ACCEPT.
+        session.phase = SessionPhase::AwaitingInit2;
 
         Ok(vec![create_auth_accept_response(
             DEFAULT_MAP_SEED,
@@ -327,7 +329,6 @@ impl CommandHandler {
         &mut self,
         session: &mut Session,
         packet: &mut NetworkPacket,
-        peer_addr: SocketAddr,
     ) -> Result<Vec<NetworkPacket>> {
         let bytes_a = packet.read_string()?;
         let based_on = packet.read_u8()?;
@@ -341,7 +342,7 @@ impl CommandHandler {
         if session.allowed_auth_mechs & chosen == 0 {
             warn!(
                 "Client from {} tried to use disallowed auth mech {}",
-                peer_addr, chosen
+                session.address, chosen
             );
             return Ok(vec![create_access_denied(
                 AccessDeniedCode::UnexpectedData,
@@ -406,7 +407,7 @@ impl CommandHandler {
 
         info!(
             "SRP_BYTES_A from {}: based_on={}, len_A={}, sending B ({} bytes)",
-            peer_addr,
+            session.address,
             based_on,
             bytes_a.len(),
             bytes_b.len()
@@ -422,7 +423,6 @@ impl CommandHandler {
         &mut self,
         session: &mut Session,
         packet: &mut NetworkPacket,
-        _peer_addr: SocketAddr,
     ) -> Result<Vec<NetworkPacket>> {
         let bytes_m = packet.read_string()?;
 
@@ -463,6 +463,11 @@ impl CommandHandler {
                     session.create_player_on_auth_success = false;
                 }
 
+                // C++ CSE_AuthAccept after sending TOCLIENT_AUTH_ACCEPT
+                // (Server::acceptAuth, src/server.cpp:3100):
+                //   CS_HelloSent --CSE_AuthAccept--> CS_AwaitingInit2
+                session.phase = SessionPhase::AwaitingInit2;
+
                 Ok(vec![create_auth_accept_response(
                     DEFAULT_MAP_SEED,
                     DEFAULT_SEND_INTERVAL,
@@ -489,14 +494,28 @@ impl CommandHandler {
     /// Handle TOSERVER_INIT2 command.
     ///
     /// The client sends this as an ACK for TOCLIENT_AUTH_ACCEPT. We send
-    /// it back the init data: ItemDef, NodeDef, media announcement, time
-    /// of day, CSM restrictions, default movement, and announce that
-    /// media is being loaded.
+    /// it back the init data: ItemDef, NodeDef, media announcement,
+    /// movement, time of day and CSM restrictions — in the exact order
+    /// the C++ server does (see `Server::handleCommand_Init2` in
+    /// `src/network/serverpackethandler.cpp`).
+    ///
+    /// INIT2 is only processed if the session is still in
+    /// `CS_AwaitingInit2`. A retransmit from a session that has
+    /// already moved on to `CS_DefinitionsSent`/`CS_Active` is
+    /// dropped, because re-sending ITEMDEF/NODEDEF to a client whose
+    /// `m_mesh_update_manager` is running would crash the C++ client
+    /// on `sanity_check(!m_mesh_update_manager->isRunning())`.
+    ///
+    /// The state machine in the C++ fires `CSE_GotInit2` before
+    /// sending ItemDef/NodeDef (transitioning to `CS_InitDone`) and
+    /// `CSE_SetDefinitionsSent` after them (transitioning to
+    /// `CS_DefinitionsSent`), and we mirror those two events here
+    /// so any observer that needs the fine-grained `ClientState`
+    /// sees the same intermediate window.
     fn handle_init2(
         &mut self,
         session: &mut Session,
         packet: &mut NetworkPacket,
-        peer_addr: SocketAddr,
     ) -> Result<Vec<NetworkPacket>> {
         // Wire format: optional std::string lang_code
         let lang = packet.read_utf8().ok();
@@ -504,21 +523,43 @@ impl CommandHandler {
         match lang.as_deref() {
             Some(l) if !l.is_empty() => info!(
                 "Client {} ({}) sent INIT2 (lang={})",
-                peer_addr,
+                session.address,
                 session.player_name.as_deref().unwrap_or("?"),
                 l
             ),
             _ => info!(
                 "Client {} ({}) sent INIT2 (no language code reported)",
-                peer_addr,
+                session.address,
                 session.player_name.as_deref().unwrap_or("?"),
             ),
         }
 
-        // Mark the session as in the media-loading phase but keep
-        // connection_state == Startup so the state machine still
-        // accepts the media-related commands.
-        session.phase = SessionPhase::MediaLoading;
+        // Guard: the C++ server only accepts TOSERVER_INIT2 when the
+        // session is in the `CS_AwaitingInit2` equivalent. Without
+        // this check, a client that retransmits INIT2 *after* having
+        // already transitioned to `Active` would receive a second
+        // ITEMDEF/NODEDEF pair while the client's
+        // `m_mesh_update_manager` is running — and the C++ client's
+        // `handleCommand_ItemDef` / `handleCommand_NodeDef` open
+        // with `sanity_check(!m_mesh_update_manager->isRunning())`,
+        // which `[[noreturn]]`-crashes the client (see
+        // `src/network/clientpackethandler.cpp:773,751`).
+        if session.phase != SessionPhase::AwaitingInit2 {
+            warn!(
+                "INIT2 from {} in wrong phase {:?}, ignoring",
+                session.address, session.phase
+            );
+            return Ok(vec![]);
+        }
+
+        // C++ state machine in
+        // `Server::handleCommand_Init2` (src/network/serverpackethandler.cpp:281,301):
+        //   CS_AwaitingInit2 --CSE_GotInit2-->            CS_InitDone
+        //   CS_InitDone       --CSE_SetDefinitionsSent--> CS_DefinitionsSent
+        // We apply `CSE_GotInit2` *before* sending ItemDef/NodeDef
+        // (mirrors line 281) so the intermediate `CS_InitDone`
+        // window is preserved for observers that care about it.
+        session.phase = SessionPhase::InitDone;
 
         // Clear any pending SRP state
         self.pending_srp.remove(&session.peer_id);
@@ -537,12 +578,29 @@ impl CommandHandler {
         let itemdef_payload = serialize_empty_itemdef();
         let nodedef_payload = serialize_empty_nodedef();
 
+        // Packet order mirrors `Server::handleCommand_Init2` in
+        // `src/network/serverpackethandler.cpp:295-327`:
+        //   1. ItemDef
+        //   2. NodeDef
+        //   3. AnnounceMedia
+        //   4. ActiveObjectRemoveAdd (no PlayerSAO yet on first
+        //      connect, so a no-op until we have a ServerEnvironment)
+        //   5. DetachedInventories  (none registered, so a no-op)
+        //   6. Movement
+        //   7. TimeOfDay
+        //   8. CsmRestrictionFlags
         let mut responses = Vec::new();
         responses.push(create_itemdef_response(&itemdef_payload, negotiated_proto));
         responses.push(create_nodedef_response(&nodedef_payload, negotiated_proto));
+
+        session.phase = SessionPhase::DefinitionsSent; // after sending ITEMDEF/NODEDEF, before media announce
+
         responses.push(create_announce_media(&MEDIA_FILES, ""));
-        responses.push(create_time_of_day(DEFAULT_TIME_OF_DAY, DEFAULT_TIME_SPEED));
-        responses.push(create_csm_restriction_flags(CSM_RF_NONE, DEFAULT_CSM_NODE_RANGE));
+        // TODO: SendActiveObjectRemoveAdd (the C++ server sends the
+        // player SAO add here; we have no SAO on first connect so
+        // this is a no-op until we have a ServerEnvironment).
+        // TODO: sendDetachedInventories (no detached inventories
+        // registered; no-op until we have an InventoryManager).
         responses.push(create_movement(
             DEFAULT_MOVEMENT.acceleration_default,
             DEFAULT_MOVEMENT.acceleration_air,
@@ -557,6 +615,8 @@ impl CommandHandler {
             DEFAULT_MOVEMENT.liquid_sink,
             DEFAULT_MOVEMENT.gravity,
         ));
+        responses.push(create_time_of_day(DEFAULT_TIME_OF_DAY, DEFAULT_TIME_SPEED));
+        responses.push(create_csm_restriction_flags(CSM_RF_NONE, DEFAULT_CSM_NODE_RANGE));
 
         Ok(responses)
     }
@@ -568,7 +628,6 @@ impl CommandHandler {
         &mut self,
         session: &mut Session,
         packet: &mut NetworkPacket,
-        peer_addr: SocketAddr,
     ) -> Result<Vec<NetworkPacket>> {
         let count = packet.read_u16()? as usize;
         let mut names = Vec::with_capacity(count);
@@ -577,7 +636,7 @@ impl CommandHandler {
         }
         info!(
             "Client {} ({}) requested {} media file(s)",
-            peer_addr,
+            session.address,
             session.player_name.as_deref().unwrap_or("?"),
             names.len()
         );
@@ -632,7 +691,6 @@ impl CommandHandler {
         &mut self,
         session: &mut Session,
         packet: &mut NetworkPacket,
-        peer_addr: SocketAddr,
     ) -> Result<Vec<NetworkPacket>> {
         let count = packet.read_u8()? as usize;
         let mut tokens = Vec::with_capacity(count);
@@ -641,7 +699,7 @@ impl CommandHandler {
         }
         info!(
             "Client {} ({}) acknowledged {} media token(s): {:?}",
-            peer_addr,
+            session.address,
             session.player_name.as_deref().unwrap_or("?"),
             tokens.len(),
             tokens
@@ -671,7 +729,7 @@ impl CommandHandler {
     fn handle_player_pos(
         &mut self,
         session: &mut Session,
-        _packet: &NetworkPacket,
+        _packet: &mut NetworkPacket,
     ) -> Result<Vec<NetworkPacket>> {
         debug!("Received PLAYERPOS from peer {}", session.peer_id);
         Ok(vec![])
@@ -684,19 +742,29 @@ impl CommandHandler {
         packet: &mut NetworkPacket,
     ) -> Result<Vec<NetworkPacket>> {
         let message = packet.read_wstring()?;
+        let sender = session.player_name.clone().unwrap_or_default();
 
         info!(
             "Chat message from {} ({}): {}",
-            session.player_name.as_deref().unwrap_or("unknown"),
+            sender,
             session.peer_id,
             message
         );
 
-        Ok(vec![create_chat_message_response(&format!(
-            "<{}> {}",
-            session.player_name.as_deref().unwrap_or("Player"),
-            message
-        ))])
+        // The C++ `Client::handleCommand_ChatMessage` formats the
+        // displayed line itself ("<sender> message"), so the server
+        // must pass the raw player name and the raw chat text as
+        // separate fields. Pre-formatting `"<{sender}> {message}"`
+        // into the `message` field would render as
+        // `"<sender> <sender> message"` on the client and crash
+        // the message parser.
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Ok(vec![create_chat_message_response(
+            &sender, &message, timestamp,
+        )])
     }
 
     /// Handle TOSERVER_CLIENT_READY command.
@@ -720,9 +788,11 @@ impl CommandHandler {
             session.peer_id, major, minor, patch, full_version
         );
 
-        // Client is fully connected.
+        // Client is fully connected. In the C++ server this is the
+        // transition `CS_DefinitionsSent` → `CS_Active`; in the Rust
+        // port it is `SessionPhase::Active`, which unlocks the
+        // `Ingame`-category opcode gating.
         session.phase = SessionPhase::Active;
-        session.connection_state = ToServerConnectionState::Ingame;
 
         Ok(vec![])
     }
@@ -897,7 +967,6 @@ impl CommandHandler {
         &mut self,
         session: &mut Session,
         packet: &mut NetworkPacket,
-        peer_addr: SocketAddr,
     ) -> Result<Vec<NetworkPacket>> {
         let action_byte = packet.read_u8()?;
         let action = match InteractAction::from_u8(action_byte) {
@@ -905,7 +974,7 @@ impl CommandHandler {
             None => {
                 warn!(
                     "INTERACT: unknown action 0x{:02x} from {}",
-                    action_byte, peer_addr
+                    action_byte, session.address
                 );
                 return Ok(vec![]);
             }
@@ -1232,6 +1301,146 @@ impl CommandHandler {
 
 // --- Module-level constants & helpers --------------------------------------
 
+/// Function-pointer type for a single opcode's handler.
+///
+/// Mirrors the C++ `void (Server::*handler)(NetworkPacket*)` field
+/// of `ToServerCommandHandler` in
+/// [`src/network/serveropcodes.h`](../../../../src/network/serveropcodes.h).
+///
+/// In Rust the equivalent is a `fn` pointer to a method on
+/// `CommandHandler` — methods with `&mut self` are coercible to
+/// `fn(&mut Self, ...)` pointers, which is what the lookup table
+/// stores. This gives the same indirect-call dispatch as the C++
+/// `toServerCommandTable[i].handler` while staying zero-cost: the
+/// pointer is loaded from a `static` array and called.
+///
+/// All handlers share the same uniform signature so the table is a
+/// flat array indexed by opcode (no per-opcode wrapper, no
+/// `dyn Trait`). The peer's `SocketAddr` is intentionally *not* a
+/// parameter — handlers that need it for logging read
+/// `session.address` directly, mirroring the C++ pattern of
+/// looking up the address from the con when needed.
+type Handler = fn(
+    handler: &mut CommandHandler,
+    session: &mut Session,
+    packet: &mut NetworkPacket,
+) -> Result<Vec<NetworkPacket>>;
+
+/// One row of the dispatch table — pairs a handler with the
+/// C++ `ToServerConnectionState` category the opcode belongs to.
+///
+/// Mirrors the C++ `ToServerCommandHandler` struct in
+/// `src/network/serveropcodes.h:19-24` which carries `name`,
+/// `state` and `handler` in a single struct so the dispatch
+/// (`Server::ProcessData` in `src/server.cpp`) can filter on
+/// `state` and then call `handler` in one table lookup.
+#[derive(Clone, Copy)]
+struct HandlerEntry {
+    state: ToServerConnectionState,
+    handler: Handler,
+}
+
+/// Opcode-to-handler dispatch table, indexed by
+/// `ToServerCommand as u16`. Mirrors the C++ `toServerCommandTable`
+/// array line-for-line: every slot that the C++ table populates
+/// with a real handler gets a real handler here, and the
+/// unassigned opcodes are `None`.
+///
+/// Unlike the C++ table the name lives in
+/// `luanti-network::TO_SERVER_COMMAND_TABLE` (the `luanti-network`
+/// crate is shared with the client and needs the name for
+/// logging) but the **state** is duplicated here so the dispatch
+/// in [`CommandHandler::handle_command`] can do the
+/// `ProcessData`-equivalent category filter without a second
+/// table lookup. The two state columns are kept in lock-step
+/// by hand and asserted by `HANDLER_TABLE_SPEC` below.
+static HANDLER_TABLE: [Option<HandlerEntry>; luanti_network::TOSERVER_NUM_MSG_TYPES] = [
+    None, // 0x00 (never used)
+    None, // 0x01
+    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_init }), // 0x02
+    None, // 0x03
+    None, // 0x04
+    None, // 0x05
+    None, // 0x06
+    None, // 0x07
+    None, // 0x08
+    None, // 0x09
+    None, // 0x0a
+    None, // 0x0b
+    None, // 0x0c
+    None, // 0x0d
+    None, // 0x0e
+    None, // 0x0f
+    None, // 0x10
+    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_init2 }), // 0x11
+    None, // 0x12
+    None, // 0x13
+    None, // 0x14
+    None, // 0x15
+    None, // 0x16
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_modchannel_join }), // 0x17
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_modchannel_leave }), // 0x18
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_modchannel_msg }), // 0x19
+    None, // 0x1a
+    None, // 0x1b
+    None, // 0x1c
+    None, // 0x1d
+    None, // 0x1e
+    None, // 0x1f
+    None, // 0x20
+    None, // 0x21
+    None, // 0x22
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_player_pos }), // 0x23
+    Some(HandlerEntry { state: ToServerConnectionState::Startup, handler: CommandHandler::handle_got_blocks }), // 0x24
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_deleted_blocks }), // 0x25
+    None, // 0x26
+    None, // 0x27
+    None, // 0x28
+    None, // 0x29
+    None, // 0x2a
+    None, // 0x2b
+    None, // 0x2c
+    None, // 0x2d
+    None, // 0x2e
+    None, // 0x2f
+    None, // 0x30
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_inventory_action }), // 0x31
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_chat_message }), // 0x32
+    None, // 0x33
+    None, // 0x34
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_damage }), // 0x35
+    None, // 0x36
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_player_item }), // 0x37
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_respawn_legacy }), // 0x38
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_interact }), // 0x39
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_removed_sounds }), // 0x3a
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_node_meta_fields }), // 0x3b
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_inventory_fields }), // 0x3c
+    None, // 0x3d
+    None, // 0x3e
+    None, // 0x3f
+    Some(HandlerEntry { state: ToServerConnectionState::Startup, handler: CommandHandler::handle_request_media }), // 0x40
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_have_media }), // 0x41
+    None, // 0x42
+    Some(HandlerEntry { state: ToServerConnectionState::Startup, handler: CommandHandler::handle_client_ready }), // 0x43
+    None, // 0x44
+    None, // 0x45
+    None, // 0x46
+    None, // 0x47
+    None, // 0x48
+    None, // 0x49
+    None, // 0x4a
+    None, // 0x4b
+    None, // 0x4c
+    None, // 0x4d
+    None, // 0x4e
+    None, // 0x4f
+    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_first_srp }), // 0x50
+    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_srp_bytes_a }), // 0x51
+    Some(HandlerEntry { state: ToServerConnectionState::NotConnected, handler: CommandHandler::handle_srp_bytes_m }), // 0x52
+    Some(HandlerEntry { state: ToServerConnectionState::Ingame, handler: CommandHandler::handle_update_client_info }), // 0x53
+];
+
 /// `CSM_RF_NONE` from the C++ `CSMRestrictionFlags` enum.
 const CSM_RF_NONE: u64 = 0x0000_0000;
 
@@ -1428,8 +1637,7 @@ mod tests {
         p.write_utf8("x");
 
         let responses = h
-            .handle_command(&mut session, &p, "127.0.0.1:0".parse().unwrap())
-            .unwrap();
+            .handle_command(&mut session, &p).unwrap();
         // Should respond with access denied
         assert_eq!(responses.len(), 1);
         // The response starts with TOCLIENT_ACCESS_DENIED = 0x0A
@@ -1450,8 +1658,7 @@ mod tests {
         p.write_utf8("x x"); // space is invalid
 
         let responses = h
-            .handle_command(&mut session, &p, "127.0.0.1:0".parse().unwrap())
-            .unwrap();
+            .handle_command(&mut session, &p).unwrap();
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].command(), 0x0A);
     }
@@ -1461,20 +1668,23 @@ mod tests {
         let mut session = Session::new(2, "127.0.0.1:0".parse().unwrap());
         let auth = make_auth();
         let mut h = CommandHandler::new(40, 42, Box::new(auth));
-        session.connection_state = ToServerConnectionState::Startup;
 
-        // REQUEST_MEDIA with count=0
+        // REQUEST_MEDIA is a Startup-category command in the C++
+        // table, so it is unconditionally accepted by the gate
+        // (mirroring `Server::ProcessData`'s early-return path).
+        // Before INIT2 the server has no media registered, so the
+        // handler short-circuits with an empty media bunch — *not*
+        // a hard drop.
         let p = pkt(0x0040, &[0x00, 0x00]);
         let responses = h
-            .handle_command(&mut session, &p, "127.0.0.1:0".parse().unwrap())
-            .unwrap();
-        assert!(responses.is_empty());
+            .handle_command(&mut session, &p).unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].command(), 0x0038); // TOCLIENT_MEDIA
     }
 
     #[test]
     fn srp_bytes_a_rejects_disallowed_mech() {
         let mut session = Session::new(2, "127.0.0.1:0".parse().unwrap());
-        session.connection_state = ToServerConnectionState::Startup;
         session.player_name = Some("nrz".to_string());
         session.enc_pwd = Some("#1#fake".to_string());
         session.allowed_auth_mechs = AuthMechanism::LegacyPassword as u32; // only legacy
@@ -1488,8 +1698,7 @@ mod tests {
         p.write_u8(1);
 
         let responses = h
-            .handle_command(&mut session, &p, "127.0.0.1:0".parse().unwrap())
-            .unwrap();
+            .handle_command(&mut session, &p).unwrap();
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].command(), 0x0A);
     }
@@ -1508,14 +1717,11 @@ mod tests {
         p.write_u16(42);
         p.write_utf8("nrz");
         let r = h
-            .handle_command(&mut session, &p, "127.0.0.1:0".parse().unwrap())
-            .unwrap();
+            .handle_command(&mut session, &p).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].command(), 0x0002); // TOCLIENT_HELLO
-        assert_eq!(
-            session.connection_state,
-            ToServerConnectionState::Startup
-        );
+        // C++ CS_Created --CSE_Hello--> CS_HelloSent
+        assert_eq!(session.phase, SessionPhase::HelloSent);
 
         // 2. FIRST_SRP
         let mut p = NetworkPacket::new(0x0050, 0);
@@ -1523,20 +1729,33 @@ mod tests {
         p.write_string(b"verifier");
         p.write_u8(0);
         let r = h
-            .handle_command(&mut session, &p, "127.0.0.1:0".parse().unwrap())
-            .unwrap();
+            .handle_command(&mut session, &p).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].command(), 0x0003); // TOCLIENT_AUTH_ACCEPT
 
         // 3. INIT2
         let p = NetworkPacket::new(0x0011, 0);
         let r = h
-            .handle_command(&mut session, &p, "127.0.0.1:0".parse().unwrap())
+            .handle_command(&mut session, &p).unwrap();
+        // Should send ItemDef + NodeDef + AnnounceMedia + Movement +
+        // TimeOfDay + CsmRestrictionFlags = 6 packets (in that
+        // exact C++ order — see `handle_init2`).
+        assert_eq!(r.len(), 6);
+        assert_eq!(r[0].command(), 0x003D); // TOCLIENT_ITEMDEF
+        assert_eq!(r[1].command(), 0x003A); // TOCLIENT_NODEDEF
+        assert_eq!(r[2].command(), 0x003C); // TOCLIENT_ANNOUNCE_MEDIA
+        assert_eq!(r[3].command(), 0x0045); // TOCLIENT_MOVEMENT
+        assert_eq!(r[4].command(), 0x0029); // TOCLIENT_TIME_OF_DAY
+        assert_eq!(r[5].command(), 0x002A); // TOCLIENT_CSM_RESTRICTION_FLAGS
+        // C++ CS_InitDone --CSE_SetDefinitionsSent--> CS_DefinitionsSent
+        assert_eq!(session.phase, SessionPhase::DefinitionsSent);
+
+        // Re-sending INIT2 in MediaLoading phase must be a no-op
+        // (mirrors C++ `getClientState(peer_id) != CS_AwaitingInit2`).
+        let r2 = h
+            .handle_command(&mut session, &NetworkPacket::new(0x0011, 0))
             .unwrap();
-        // Should send ItemDef + NodeDef + AnnounceMedia + TimeOfDay +
-        // CsmRestrictionFlags + Movement = 6 packets.
-        assert!(r.len() >= 6);
-        assert_eq!(session.phase, SessionPhase::MediaLoading);
+        assert!(r2.is_empty(), "INIT2 must be dropped in MediaLoading");
 
         // 4. CLIENT_READY
         let mut p = NetworkPacket::new(0x0043, 0);
@@ -1546,13 +1765,204 @@ mod tests {
         p.write_u8(0);
         p.write_utf8("5.8.0");
         let r = h
-            .handle_command(&mut session, &p, "127.0.0.1:0".parse().unwrap())
-            .unwrap();
+            .handle_command(&mut session, &p).unwrap();
         assert!(r.is_empty());
         assert_eq!(session.phase, SessionPhase::Active);
-        assert_eq!(
-            session.connection_state,
-            ToServerConnectionState::Ingame
-        );
+    }
+
+    #[test]
+    fn handshake_retransmits_are_accepted_at_any_phase() {
+        // Mirrors the C++ behaviour where `Server::ProcessData`
+        // early-returns on `NotConnected`/`Startup` opcodes without
+        // consulting `ClientState`. Once a client has reached the
+        // `Active` phase it may still re-send the handshake packets
+        // (e.g. on perceived packet loss) and they must be processed
+        // rather than dropped.
+        let mut session = Session::new(2, "127.0.0.1:0".parse().unwrap());
+        let fixture = make_auth_fixture();
+        let mut h = CommandHandler::new(40, 42, Box::new(fixture.db));
+
+        // Drive the session to Active.
+        let mut p = NetworkPacket::new(0x0002, 0);
+        p.write_u8(29);
+        p.write_u16(0);
+        p.write_u16(40);
+        p.write_u16(42);
+        p.write_utf8("nrz");
+        h.handle_command(&mut session, &p).unwrap();
+
+        let mut p = NetworkPacket::new(0x0050, 0);
+        p.write_string(b"salt");
+        p.write_string(b"verifier");
+        p.write_u8(0);
+        h.handle_command(&mut session, &p).unwrap();
+
+        h.handle_command(
+            &mut session,
+            &NetworkPacket::new(0x0011, 0),
+        )
+        .unwrap();
+
+        let mut p = NetworkPacket::new(0x0043, 0);
+        p.write_u8(5);
+        p.write_u8(8);
+        p.write_u8(0);
+        p.write_u8(0);
+        p.write_utf8("5.8.0");
+        h.handle_command(&mut session, &p).unwrap();
+        assert_eq!(session.phase, SessionPhase::Active);
+
+        // Re-send SRP_BYTES_A, SRP_BYTES_M, INIT2, CLIENT_READY
+        // while in Active phase: every one must be accepted (no
+        // "not allowed in current state" warning, no empty drop).
+        let mut p = NetworkPacket::new(0x0051, 0);
+        p.write_string(&vec![0u8; 256]);
+        p.write_u8(1);
+        let r = h
+            .handle_command(&mut session, &p).unwrap();
+        assert!(!r.is_empty(), "SRP_BYTES_A must be re-accepted");
+
+        let r = h
+            .handle_command(
+                &mut session,
+                &NetworkPacket::new(0x0011, 0),
+            )
+            .unwrap();
+        // INIT2 retransmits after Active are dropped: the C++ server
+        // returns early on `client->getState() != CS_AwaitingInit2`,
+        // and re-sending ITEMDEF/NODEDEF to a client whose
+        // `m_mesh_update_manager` is running would crash the C++
+        // client on `sanity_check(!m_mesh_update_manager->isRunning())`.
+        assert!(r.is_empty(), "INIT2 must NOT be re-processed in Active phase");
+
+        let mut p = NetworkPacket::new(0x0043, 0);
+        p.write_u8(5);
+        p.write_u8(8);
+        p.write_u8(0);
+        p.write_u8(0);
+        p.write_utf8("5.8.0");
+        let r = h
+            .handle_command(&mut session, &p).unwrap();
+        assert!(r.is_empty(), "CLIENT_READY is ack-only");
+    }
+
+    #[test]
+    fn ingame_commands_dropped_before_active() {
+        // HAVE_MEDIA is Ingame-category, so it requires
+        // `phase == Active` — mirroring the C++
+        // `m_clients.getClientState(peer_id) < CS_Active` drop.
+        let mut session = Session::new(2, "127.0.0.1:0".parse().unwrap());
+        let fixture = make_auth_fixture();
+        let mut h = CommandHandler::new(40, 42, Box::new(fixture.db));
+
+        // Drive to MediaLoading (INIT → FIRST_SRP → INIT2).
+        let mut p = NetworkPacket::new(0x0002, 0);
+        p.write_u8(29);
+        p.write_u16(0);
+        p.write_u16(40);
+        p.write_u16(42);
+        p.write_utf8("nrz");
+        h.handle_command(&mut session, &p).unwrap();
+        let mut p = NetworkPacket::new(0x0050, 0);
+        p.write_string(b"salt");
+        p.write_string(b"verifier");
+        p.write_u8(0);
+        h.handle_command(&mut session, &p).unwrap();
+        h.handle_command(
+            &mut session,
+            &NetworkPacket::new(0x0011, 0),
+        )
+        .unwrap();
+        assert_eq!(session.phase, SessionPhase::DefinitionsSent);
+
+        // HAVE_MEDIA while in DefinitionsSent: must be dropped
+        // (no response, mirroring the C++ warning drop —
+        // `state < CS_Active` for an Ingame-category opcode).
+        let mut p = NetworkPacket::new(0x0041, 0);
+        p.write_u8(0);
+        let r = h
+            .handle_command(&mut session, &p).unwrap();
+        assert!(r.is_empty(), "HAVE_MEDIA must be dropped pre-Active");
+    }
+
+    #[test]
+    fn handler_table_state_matches_cpp_to_server_command_table() {
+        // The HANDLER_TABLE state column must match
+        // `ToServerCommandSpec::required_state` in
+        // `luanti-network/src/opcodes.rs` (the latter is the
+        // single source of truth that mirrors the C++
+        // `toServerCommandTable[command].state` field in
+        // `src/network/serveropcodes.cpp`). Walking both tables
+        // opcode-by-opcode keeps them in lock-step.
+        for (raw, slot) in HANDLER_TABLE.iter().enumerate() {
+            let raw = raw as u16;
+            let Some(cmd) = ToServerCommand::from_u16(raw) else {
+                assert!(
+                    slot.is_none(),
+                    "HANDLER_TABLE has a handler for opcode 0x{:04x} \
+                     that has no ToServerCommand variant",
+                    raw
+                );
+                continue;
+            };
+            match slot {
+                None => panic!(
+                    "ToServerCommand::{:?} (0x{:04x}) has a Rust variant but \
+                     no entry in HANDLER_TABLE",
+                    cmd, raw
+                ),
+                Some(entry) => {
+                    assert_eq!(
+                        entry.state,
+                        cmd.required_state(),
+                        "HANDLER_TABLE state mismatch for {:?} (0x{:04x}): \
+                         table says {:?}, opcode spec says {:?}. \
+                         Keep the two in lock-step — they mirror the C++ \
+                         `toServerCommandTable[command].state` column \
+                         (src/network/serveropcodes.cpp).",
+                        cmd,
+                        raw,
+                        entry.state,
+                        cmd.required_state(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn modchannel_accepted_in_awaiting_init2_rejected_before() {
+        // The C++ `TOSERVER_MODCHANNEL_*` opcodes are
+        // `TOSERVER_STATE_INGAME` (serveropcodes.cpp:37-39), so
+        // `Server::ProcessData` drops them with a warning when
+        // `getClientState(peer_id) < CS_Active`. We mirror that:
+        // Ingame-category opcodes are dropped in any pre-Active
+        // phase and accepted in Active.
+        let mut session = Session::new(2, "127.0.0.1:0".parse().unwrap());
+        let fixture = make_auth_fixture();
+        let mut h = CommandHandler::new(40, 42, Box::new(fixture.db));
+
+        // Drive to AwaitingInit2 (INIT → FIRST_SRP).
+        let mut p = NetworkPacket::new(0x0002, 0);
+        p.write_u8(29);
+        p.write_u16(0);
+        p.write_u16(40);
+        p.write_u16(42);
+        p.write_utf8("nrz");
+        h.handle_command(&mut session, &p).unwrap();
+        let mut p = NetworkPacket::new(0x0050, 0);
+        p.write_string(b"salt");
+        p.write_string(b"verifier");
+        p.write_u8(0);
+        h.handle_command(&mut session, &p).unwrap();
+        assert_eq!(session.phase, SessionPhase::AwaitingInit2);
+
+        // MODCHANNEL_JOIN while in AwaitingInit2: must be dropped
+        // (the C++ logs "but client isn't active yet. Dropping packet."
+        // and returns — same outcome as the Rust warn-and-return-vec![]).
+        let mut p = NetworkPacket::new(0x0017, 0);
+        p.write_utf8("chan");
+        let r = h.handle_command(&mut session, &p).unwrap();
+        assert!(r.is_empty(), "MODCHANNEL_JOIN must be dropped in AwaitingInit2");
     }
 }

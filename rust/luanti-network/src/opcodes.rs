@@ -1,9 +1,247 @@
 // Opcodes and command definitions for the Luanti protocol
-// Based on ToServerCommand and ToClientCommand enums
+// Based on ToServerCommand and ToClientCommand enums.
+//
+// The opcode metadata (name, required connection-state, send
+// channel, reliability) is stored in two static lookup tables
+// indexed by the wire value, mirroring the C++ `toServerCommandTable`
+// and `clientCommandFactoryTable` arrays in
+// `src/network/serveropcodes.cpp` and `clientopcodes.cpp`. The
+// `ToServerCommand` / `ToClientCommand` enums stay as type-safe
+// handles (so call-sites get exhaustiveness checking) and their
+// `name()` / `required_state()` / `channel()` / `is_reliable()`
+// accessors are thin lookups into the table — there is no parallel
+// `match` to keep in sync with the data.
 
 use std::fmt;
 
-/// Commands that can be sent from client to server
+/// Size of the server-side opcode table. Must match
+/// `TOSERVER_NUM_MSG_TYPES` in
+/// `src/network/networkprotocol.h`.
+pub const TOSERVER_NUM_MSG_TYPES: usize = 0x54;
+
+/// Size of the client-side opcode table. Must match
+/// `TOCLIENT_NUM_MSG_TYPES` in
+/// `src/network/networkprotocol.h`.
+pub const TOCLIENT_NUM_MSG_TYPES: usize = 0x65;
+
+/// Metadata for a single `TOSERVER_*` opcode. Mirrors the
+/// `ToServerCommandHandler` struct in `src/network/serveropcodes.h`
+/// minus the function pointer (the Rust port dispatches via a
+/// `match` on the `ToServerCommand` enum in `command_handler.rs`
+/// — see the "Command dispatch" section in
+/// `rust/luanti-server/src/command_handler.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct ToServerCommandSpec {
+    /// Human-readable name (e.g. `"TOSERVER_INIT"`), used in logs
+    /// and wire-level error messages.
+    pub name: &'static str,
+    /// Connection-state category that gates this opcode in
+    /// `Server::ProcessData` (and the Rust port's
+    /// `CommandHandler::check_command_state`).
+    pub required_state: ToServerConnectionState,
+}
+
+/// Server-side opcode table, indexed by the on-the-wire `u16`
+/// opcode. Each non-null slot is a `ToServerCommandSpec`; null
+/// slots correspond to unassigned opcodes (the C++ source fills
+/// those with a `null_command_handler` of category `ALL`).
+///
+/// **Source of truth**: this table mirrors the
+/// `toServerCommandTable[TOSERVER_NUM_MSG_TYPES]` array literal in
+/// `src/network/serveropcodes.cpp` line-for-line. Any change to
+/// the C++ table must be reflected here.
+static TO_SERVER_COMMAND_TABLE: [Option<ToServerCommandSpec>; TOSERVER_NUM_MSG_TYPES] = [
+    None, // 0x00 (never used)
+    None, // 0x01
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_INIT",
+        required_state: ToServerConnectionState::NotConnected,
+    }), // 0x02
+    None, // 0x03
+    None, // 0x04
+    None, // 0x05
+    None, // 0x06
+    None, // 0x07
+    None, // 0x08
+    None, // 0x09
+    None, // 0x0a
+    None, // 0x0b
+    None, // 0x0c
+    None, // 0x0d
+    None, // 0x0e
+    None, // 0x0f
+    None, // 0x10
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_INIT2",
+        required_state: ToServerConnectionState::NotConnected,
+    }), // 0x11
+    None, // 0x12
+    None, // 0x13
+    None, // 0x14
+    None, // 0x15
+    None, // 0x16
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_MODCHANNEL_JOIN",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x17
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_MODCHANNEL_LEAVE",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x18
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_MODCHANNEL_MSG",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x19
+    None, // 0x1a
+    None, // 0x1b
+    None, // 0x1c
+    None, // 0x1d
+    None, // 0x1e
+    None, // 0x1f
+    None, // 0x20
+    None, // 0x21
+    None, // 0x22
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_PLAYERPOS",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x23
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_GOTBLOCKS",
+        required_state: ToServerConnectionState::Startup,
+    }), // 0x24
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_DELETEDBLOCKS",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x25
+    None, // 0x26
+    None, // 0x27
+    None, // 0x28
+    None, // 0x29
+    None, // 0x2a
+    None, // 0x2b
+    None, // 0x2c
+    None, // 0x2d
+    None, // 0x2e
+    None, // 0x2f
+    None, // 0x30
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_INVENTORY_ACTION",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x31
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_CHAT_MESSAGE",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x32
+    None, // 0x33
+    None, // 0x34
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_DAMAGE",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x35
+    None, // 0x36
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_PLAYERITEM",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x37
+    // 0x38: TOSERVER_RESPAWN_LEGACY. The C++ server defines this in
+    // its `ToServerCommand` enum but leaves the dispatch table slot
+    // empty (a `null_command_handler` of category `TOSERVER_STATE_ALL`).
+    // The Rust port implements a real handler (legacy respawn for
+    // clients < 5.0.0 that predate the modern death-screen
+    // formspec), so we give it a concrete entry. The state is
+    // `Ingame` because respawning is only meaningful in-game; the
+    // C++ effectively accepts it at any state because its null
+    // handler is a no-op.
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_RESPAWN_LEGACY",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x38
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_INTERACT",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x39
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_REMOVED_SOUNDS",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x3a
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_NODEMETA_FIELDS",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x3b
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_INVENTORY_FIELDS",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x3c
+    None, // 0x3d
+    None, // 0x3e
+    None, // 0x3f
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_REQUEST_MEDIA",
+        required_state: ToServerConnectionState::Startup,
+    }), // 0x40
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_HAVE_MEDIA",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x41
+    None, // 0x42
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_CLIENT_READY",
+        required_state: ToServerConnectionState::Startup,
+    }), // 0x43
+    None, // 0x44
+    None, // 0x45
+    None, // 0x46
+    None, // 0x47
+    None, // 0x48
+    None, // 0x49
+    None, // 0x4a
+    None, // 0x4b
+    None, // 0x4c
+    None, // 0x4d
+    None, // 0x4e
+    None, // 0x4f
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_FIRST_SRP",
+        required_state: ToServerConnectionState::NotConnected,
+    }), // 0x50
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_SRP_BYTES_A",
+        required_state: ToServerConnectionState::NotConnected,
+    }), // 0x51
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_SRP_BYTES_M",
+        required_state: ToServerConnectionState::NotConnected,
+    }), // 0x52
+    Some(ToServerCommandSpec {
+        name: "TOSERVER_UPDATE_CLIENT_INFO",
+        required_state: ToServerConnectionState::Ingame,
+    }), // 0x53
+];
+
+/// Look up a `ToServerCommandSpec` by raw wire opcode.
+///
+/// This is the table-driven equivalent of the C++
+///
+/// ```cpp
+/// if (command < TOSERVER_NUM_MSG_TYPES
+///         && toServerCommandTable[command].state != TOSERVER_STATE_ALL)
+///     handle();
+/// ```
+///
+/// pattern. Returns `None` for unassigned opcodes (so the caller
+/// can log "Unknown command" and drop the packet, exactly like the
+/// C++ `handleCommand_Deprecated` path).
+pub fn lookup_to_server_command(value: u16) -> Option<ToServerCommandSpec> {
+    TO_SERVER_COMMAND_TABLE
+        .get(value as usize)
+        .and_then(|slot| *slot)
+}
+
+/// Commands that can be sent from client to server.
+///
+/// The discriminants must match the on-the-wire opcode values; the
+/// enum is the type-safe view of `TO_SERVER_COMMAND_TABLE` and the
+/// two stay in lock-step.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToServerCommand {
@@ -34,6 +272,8 @@ pub enum ToServerCommand {
 }
 
 impl ToServerCommand {
+    /// Decode a wire opcode to its enum variant. Inverse of the
+    /// `#[repr(u16)]` discriminant.
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
             0x02 => Some(Self::Init),
@@ -64,59 +304,415 @@ impl ToServerCommand {
         }
     }
 
+    /// Human-readable name. Backed by `TO_SERVER_COMMAND_TABLE` —
+    /// the table is the single source of truth, this method is a
+    /// typed wrapper around it.
     pub fn name(&self) -> &'static str {
-        match self {
-            Self::Init => "TOSERVER_INIT",
-            Self::Init2 => "TOSERVER_INIT2",
-            Self::ModChannelJoin => "TOSERVER_MODCHANNEL_JOIN",
-            Self::ModChannelLeave => "TOSERVER_MODCHANNEL_LEAVE",
-            Self::ModChannelMsg => "TOSERVER_MODCHANNEL_MSG",
-            Self::PlayerPos => "TOSERVER_PLAYERPOS",
-            Self::GotBlocks => "TOSERVER_GOTBLOCKS",
-            Self::DeletedBlocks => "TOSERVER_DELETEDBLOCKS",
-            Self::InventoryAction => "TOSERVER_INVENTORY_ACTION",
-            Self::ChatMessage => "TOSERVER_CHAT_MESSAGE",
-            Self::Damage => "TOSERVER_DAMAGE",
-            Self::PlayerItem => "TOSERVER_PLAYERITEM",
-            Self::RespawnLegacy => "TOSERVER_RESPAWN_LEGACY",
-            Self::Interact => "TOSERVER_INTERACT",
-            Self::RemovedSounds => "TOSERVER_REMOVED_SOUNDS",
-            Self::NodeMetaFields => "TOSERVER_NODEMETA_FIELDS",
-            Self::InventoryFields => "TOSERVER_INVENTORY_FIELDS",
-            Self::RequestMedia => "TOSERVER_REQUEST_MEDIA",
-            Self::HaveMedia => "TOSERVER_HAVE_MEDIA",
-            Self::ClientReady => "TOSERVER_CLIENT_READY",
-            Self::FirstSrp => "TOSERVER_FIRST_SRP",
-            Self::SrpBytesA => "TOSERVER_SRP_BYTES_A",
-            Self::SrpBytesM => "TOSERVER_SRP_BYTES_M",
-            Self::UpdateClientInfo => "TOSERVER_UPDATE_CLIENT_INFO",
-        }
+        self.spec().name
     }
 
-    /// Returns the required connection state for this command
+    /// Connection-state category the server expects the peer to be
+    /// in. Mirrors `toServerCommandTable[command].state` in
+    /// [`src/network/serveropcodes.cpp`](../../../../src/network/serveropcodes.cpp).
+    ///
+    /// The C++ `Server::ProcessData` early-returns on
+    /// `NotConnected` and `Startup` (no `ClientState` check) and
+    /// only consults state for `Ingame`. The Rust
+    /// `CommandHandler::check_command_state` mirrors that dispatch.
     pub fn required_state(&self) -> ToServerConnectionState {
-        match self {
-            Self::Init => ToServerConnectionState::NotConnected,
-            Self::FirstSrp
-            | Self::SrpBytesA
-            | Self::SrpBytesM
-            | Self::Init2
-            | Self::GotBlocks
-            | Self::RequestMedia
-            | Self::HaveMedia
-            | Self::ClientReady => ToServerConnectionState::Startup,
-            _ => ToServerConnectionState::Ingame,
-        }
+        self.spec().required_state
+    }
+
+    /// Direct access to the table entry for this opcode.
+    fn spec(&self) -> ToServerCommandSpec {
+        lookup_to_server_command(*self as u16).expect("ToServerCommand variant has no table entry")
     }
 }
 
 impl fmt::Display for ToServerCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        f.write_str(self.name())
     }
 }
 
-/// Commands that can be sent from server to client
+/// Metadata for a single `TOCLIENT_*` opcode. Mirrors the
+/// `ClientCommandFactory` struct in `src/network/serveropcodes.h`.
+#[derive(Debug, Clone, Copy)]
+pub struct ToClientCommandSpec {
+    /// Human-readable name (e.g. `"TOCLIENT_HELLO"`).
+    pub name: &'static str,
+    /// MTP channel the command is sent on. Most commands use
+    /// channel 0; block data uses channel 2 (bulk); HUD commands
+    /// use channel 1.
+    pub channel: u8,
+    /// Whether the command is sent reliably. Block data is the
+    /// one exception because it can simply be re-requested by the
+    /// client on loss.
+    pub reliable: bool,
+}
+
+/// Client-side opcode table, indexed by the on-the-wire `u16`
+/// opcode. Mirrors the `clientCommandFactoryTable[TOCLIENT_NUM_MSG_TYPES]`
+/// array in `src/network/serveropcodes.cpp` line-for-line.
+static TO_CLIENT_COMMAND_TABLE: [Option<ToClientCommandSpec>; TOCLIENT_NUM_MSG_TYPES] = [
+    None, // 0x00
+    None, // 0x01
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_HELLO",
+        channel: 0,
+        reliable: true,
+    }), // 0x02
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_AUTH_ACCEPT",
+        channel: 0,
+        reliable: true,
+    }), // 0x03
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_ACCEPT_SUDO_MODE",
+        channel: 0,
+        reliable: true,
+    }), // 0x04
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_DENY_SUDO_MODE",
+        channel: 0,
+        reliable: true,
+    }), // 0x05
+    None, // 0x06
+    None, // 0x07
+    None, // 0x08
+    None, // 0x09
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_ACCESS_DENIED",
+        channel: 0,
+        reliable: true,
+    }), // 0x0A
+    None, // 0x0B
+    None, // 0x0C
+    None, // 0x0D
+    None, // 0x0E
+    None, // 0x0F
+    None, // 0x10
+    None, // 0x11
+    None, // 0x12
+    None, // 0x13
+    None, // 0x14
+    None, // 0x15
+    None, // 0x16
+    None, // 0x17
+    None, // 0x18
+    None, // 0x19
+    None, // 0x1A
+    None, // 0x1B
+    None, // 0x1C
+    None, // 0x1D
+    None, // 0x1E
+    None, // 0x1F
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_BLOCKDATA",
+        channel: 2,
+        reliable: false,
+    }), // 0x20
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_ADDNODE",
+        channel: 0,
+        reliable: true,
+    }), // 0x21
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_REMOVENODE",
+        channel: 0,
+        reliable: true,
+    }), // 0x22
+    None, // 0x23
+    None, // 0x24
+    None, // 0x25
+    None, // 0x26
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_INVENTORY",
+        channel: 0,
+        reliable: true,
+    }), // 0x27
+    None, // 0x28
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_TIME_OF_DAY",
+        channel: 0,
+        reliable: true,
+    }), // 0x29
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_CSM_RESTRICTION_FLAGS",
+        channel: 0,
+        reliable: true,
+    }), // 0x2A
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_PLAYER_SPEED",
+        channel: 0,
+        reliable: true,
+    }), // 0x2B
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_MEDIA_PUSH",
+        channel: 0,
+        reliable: true,
+    }), // 0x2C (sent on channel 1 too if legacy)
+    None, // 0x2D
+    None, // 0x2E
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_CHAT_MESSAGE",
+        channel: 0,
+        reliable: true,
+    }), // 0x2F
+    None, // 0x30
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_ACTIVE_OBJECT_REMOVE_ADD",
+        channel: 0,
+        reliable: true,
+    }), // 0x31
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_ACTIVE_OBJECT_MESSAGES",
+        channel: 0,
+        reliable: true,
+    }), // 0x32 (may also be sent unrel on channel 1)
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_HP",
+        channel: 0,
+        reliable: true,
+    }), // 0x33
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_MOVE_PLAYER",
+        channel: 0,
+        reliable: true,
+    }), // 0x34
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_ACCESS_DENIED_LEGACY",
+        channel: 0,
+        reliable: true,
+    }), // 0x35
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_FOV",
+        channel: 0,
+        reliable: true,
+    }), // 0x36
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_DEATHSCREEN_LEGACY",
+        channel: 0,
+        reliable: true,
+    }), // 0x37
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_MEDIA",
+        channel: 2,
+        reliable: true,
+    }), // 0x38
+    None, // 0x39
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_NODEDEF",
+        channel: 0,
+        reliable: true,
+    }), // 0x3A
+    None, // 0x3B
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_ANNOUNCE_MEDIA",
+        channel: 0,
+        reliable: true,
+    }), // 0x3C
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_ITEMDEF",
+        channel: 0,
+        reliable: true,
+    }), // 0x3D
+    None, // 0x3E
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_PLAY_SOUND",
+        channel: 0,
+        reliable: true,
+    }), // 0x3F (may also be sent unrel)
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_STOP_SOUND",
+        channel: 0,
+        reliable: true,
+    }), // 0x40
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_PRIVILEGES",
+        channel: 0,
+        reliable: true,
+    }), // 0x41
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_INVENTORY_FORMSPEC",
+        channel: 0,
+        reliable: true,
+    }), // 0x42
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_DETACHED_INVENTORY",
+        channel: 0,
+        reliable: true,
+    }), // 0x43
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_SHOW_FORMSPEC",
+        channel: 0,
+        reliable: true,
+    }), // 0x44
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_MOVEMENT",
+        channel: 0,
+        reliable: true,
+    }), // 0x45
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_SPAWN_PARTICLE",
+        channel: 0,
+        reliable: true,
+    }), // 0x46
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_ADD_PARTICLESPAWNER",
+        channel: 0,
+        reliable: true,
+    }), // 0x47
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_CAMERA",
+        channel: 0,
+        reliable: true,
+    }), // 0x48
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_HUDADD",
+        channel: 1,
+        reliable: true,
+    }), // 0x49
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_HUDRM",
+        channel: 1,
+        reliable: true,
+    }), // 0x4A
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_HUDCHANGE",
+        channel: 1,
+        reliable: true,
+    }), // 0x4B
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_HUD_SET_FLAGS",
+        channel: 1,
+        reliable: true,
+    }), // 0x4C
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_HUD_SET_PARAM",
+        channel: 1,
+        reliable: true,
+    }), // 0x4D
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_BREATH",
+        channel: 0,
+        reliable: true,
+    }), // 0x4E
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_SET_SKY",
+        channel: 0,
+        reliable: true,
+    }), // 0x4F
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_OVERRIDE_DAY_NIGHT_RATIO",
+        channel: 0,
+        reliable: true,
+    }), // 0x50
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_LOCAL_PLAYER_ANIMATIONS",
+        channel: 0,
+        reliable: true,
+    }), // 0x51
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_EYE_OFFSET",
+        channel: 0,
+        reliable: true,
+    }), // 0x52
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_DELETE_PARTICLESPAWNER",
+        channel: 0,
+        reliable: true,
+    }), // 0x53
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_CLOUD_PARAMS",
+        channel: 0,
+        reliable: true,
+    }), // 0x54
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_FADE_SOUND",
+        channel: 0,
+        reliable: true,
+    }), // 0x55
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_UPDATE_PLAYER_LIST",
+        channel: 0,
+        reliable: true,
+    }), // 0x56
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_MODCHANNEL_MSG",
+        channel: 0,
+        reliable: true,
+    }), // 0x57
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_MODCHANNEL_SIGNAL",
+        channel: 0,
+        reliable: true,
+    }), // 0x58
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_NODEMETA_CHANGED",
+        channel: 0,
+        reliable: true,
+    }), // 0x59
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_SET_SUN",
+        channel: 0,
+        reliable: true,
+    }), // 0x5A
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_SET_MOON",
+        channel: 0,
+        reliable: true,
+    }), // 0x5B
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_SET_STARS",
+        channel: 0,
+        reliable: true,
+    }), // 0x5C
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_MOVE_PLAYER_REL",
+        channel: 0,
+        reliable: true,
+    }), // 0x5D
+    None, // 0x5E
+    None, // 0x5F
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_SRP_BYTES_S_B",
+        channel: 0,
+        reliable: true,
+    }), // 0x60
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_FORMSPEC_PREPEND",
+        channel: 0,
+        reliable: true,
+    }), // 0x61
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_MINIMAP_MODES",
+        channel: 0,
+        reliable: true,
+    }), // 0x62
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_SET_LIGHTING",
+        channel: 0,
+        reliable: true,
+    }), // 0x63
+    Some(ToClientCommandSpec {
+        name: "TOCLIENT_SPAWN_PARTICLE_BATCH",
+        channel: 0,
+        reliable: true,
+    }), // 0x64
+];
+
+/// Look up a `ToClientCommandSpec` by raw wire opcode.
+pub fn lookup_to_client_command(value: u16) -> Option<ToClientCommandSpec> {
+    TO_CLIENT_COMMAND_TABLE
+        .get(value as usize)
+        .and_then(|slot| *slot)
+}
+
+/// Commands that can be sent from server to client.
+///
+/// Discriminants match the on-the-wire opcode values; the enum is
+/// the type-safe view of `TO_CLIENT_COMMAND_TABLE`.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToClientCommand {
@@ -168,6 +764,8 @@ pub enum ToClientCommand {
 }
 
 impl ToClientCommand {
+    /// Decode a wire opcode to its enum variant. Inverse of the
+    /// `#[repr(u16)]` discriminant.
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
             0x02 => Some(Self::Hello),
@@ -219,71 +817,28 @@ impl ToClientCommand {
         }
     }
 
+    /// Human-readable name. Backed by `TO_CLIENT_COMMAND_TABLE`.
     pub fn name(&self) -> &'static str {
-        match self {
-            Self::Hello => "TOCLIENT_HELLO",
-            Self::AuthAccept => "TOCLIENT_AUTH_ACCEPT",
-            Self::AcceptSudoMode => "TOCLIENT_ACCEPT_SUDO_MODE",
-            Self::DenySudoMode => "TOCLIENT_DENY_SUDO_MODE",
-            Self::AccessDenied => "TOCLIENT_ACCESS_DENIED",
-            Self::BlockData => "TOCLIENT_BLOCKDATA",
-            Self::AddNode => "TOCLIENT_ADDNODE",
-            Self::RemoveNode => "TOCLIENT_REMOVENODE",
-            Self::Inventory => "TOCLIENT_INVENTORY",
-            Self::TimeOfDay => "TOCLIENT_TIME_OF_DAY",
-            Self::CsmRestrictionFlags => "TOCLIENT_CSM_RESTRICTION_FLAGS",
-            Self::PlayerSpeed => "TOCLIENT_PLAYER_SPEED",
-            Self::MediaPush => "TOCLIENT_MEDIA_PUSH",
-            Self::ChatMessage => "TOCLIENT_CHAT_MESSAGE",
-            Self::ActiveObjectRemoveAdd => "TOCLIENT_ACTIVE_OBJECT_REMOVE_ADD",
-            Self::ActiveObjectMessages => "TOCLIENT_ACTIVE_OBJECT_MESSAGES",
-            Self::Hp => "TOCLIENT_HP",
-            Self::MovePlayer => "TOCLIENT_MOVE_PLAYER",
-            Self::AccessDeniedLegacy => "TOCLIENT_ACCESS_DENIED_LEGACY",
-            Self::Fov => "TOCLIENT_FOV",
-            Self::DeathScreenLegacy => "TOCLIENT_DEATHSCREEN_LEGACY",
-            Self::Media => "TOCLIENT_MEDIA",
-            Self::NodeDef => "TOCLIENT_NODEDEF",
-            Self::AnnounceMedia => "TOCLIENT_ANNOUNCE_MEDIA",
-            Self::ItemDef => "TOCLIENT_ITEMDEF",
-            Self::PlaySound => "TOCLIENT_PLAY_SOUND",
-            Self::StopSound => "TOCLIENT_STOP_SOUND",
-            Self::Privileges => "TOCLIENT_PRIVILEGES",
-            Self::InventoryFormspec => "TOCLIENT_INVENTORY_FORMSPEC",
-            Self::DetachedInventory => "TOCLIENT_DETACHED_INVENTORY",
-            Self::ShowFormspec => "TOCLIENT_SHOW_FORMSPEC",
-            Self::Movement => "TOCLIENT_MOVEMENT",
-            Self::SpawnParticle => "TOCLIENT_SPAWN_PARTICLE",
-            Self::AddParticleSpawner => "TOCLIENT_ADD_PARTICLESPAWNER",
-            Self::Camera => "TOCLIENT_CAMERA",
-            Self::HudAdd => "TOCLIENT_HUDADD",
-            Self::HudRm => "TOCLIENT_HUDRM",
-            Self::HudChange => "TOCLIENT_HUDCHANGE",
-            Self::HudSetFlags => "TOCLIENT_HUD_SET_FLAGS",
-            Self::HudSetParam => "TOCLIENT_HUD_SET_PARAM",
-            Self::Breath => "TOCLIENT_BREATH",
-            Self::SetSky => "TOCLIENT_SET_SKY",
-            Self::SrpBytesSB => "TOCLIENT_SRP_BYTES_S_B",
-            Self::ModChannelMsg => "TOCLIENT_MODCHANNEL_MSG",
-            Self::ModChannelSignal => "TOCLIENT_MODCHANNEL_SIGNAL",
-        }
+        self.spec().name
     }
 
-    /// Returns the channel this command should be sent on
+    /// MTP channel the command is sent on. Backed by
+    /// `TO_CLIENT_COMMAND_TABLE`; mirrors
+    /// `clientCommandFactoryTable[i].channel` in the C++ source.
     pub fn channel(&self) -> u8 {
-        match self {
-            Self::BlockData | Self::AddNode | Self::RemoveNode => 2,
-            Self::ActiveObjectRemoveAdd | Self::ActiveObjectMessages => 1,
-            _ => 0,
-        }
+        self.spec().channel
     }
 
-    /// Returns whether this command should be sent reliably
+    /// Whether the command is sent reliably. Backed by
+    /// `TO_CLIENT_COMMAND_TABLE`; mirrors
+    /// `clientCommandFactoryTable[i].reliable` in the C++ source.
     pub fn is_reliable(&self) -> bool {
-        match self {
-            Self::BlockData => false, // Block data can be re-requested
-            _ => true,
-        }
+        self.spec().reliable
+    }
+
+    /// Direct access to the table entry for this opcode.
+    fn spec(&self) -> ToClientCommandSpec {
+        lookup_to_client_command(*self as u16).expect("ToClientCommand variant has no table entry")
     }
 }
 
@@ -293,12 +848,32 @@ impl fmt::Display for ToClientCommand {
     }
 }
 
-/// Connection state for server processing client commands
+/// Coarse three-way connection-state category for server-side
+/// command gating. Mirrors `enum ToServerConnectionState` in
+/// [`src/network/serveropcodes.h`](../../../../src/network/serveropcodes.h).
+///
+/// In the C++ server this is *not* a per-session state — it is a
+/// property of the opcode (see `toServerCommandTable[i].state`).
+/// `Server::ProcessData` reads the opcode's category and dispatches:
+///
+/// * `NotConnected` (`TOSERVER_STATE_NOT_CONNECTED = 0`) and
+///   `Startup` (`TOSERVER_STATE_STARTUP = 1`) are early-returned
+///   with no `ClientState` check.
+/// * `Ingame` (`TOSERVER_STATE_INGAME = 2`) requires
+///   `m_clients.getClientState(peer_id) >= CS_Active`.
+/// * `All` (`TOSERVER_STATE_ALL = 3`) is a sentinel used in the
+///   null-command handler table; no real opcode is in this category
+///   but it is kept for completeness.
+///
+/// The Rust port uses the same discriminants so a `#[repr(u8)]`
+/// representation matches the C++ `u8` enum byte-for-byte.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToServerConnectionState {
-    NotConnected,
-    Startup,
-    Ingame,
+    NotConnected = 0,
+    Startup = 1,
+    Ingame = 2,
+    All = 3,
 }
 
 /// Connection state for client processing server commands

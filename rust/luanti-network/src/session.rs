@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::opcodes::ToServerConnectionState;
 use crate::protocol::*;
 
 /// Represents a connection session with a peer
@@ -20,7 +19,6 @@ pub struct Session {
     pub next_outgoing_seqnum: u16,
     pub next_incoming_seqnum: u16,
     pub pending_acks: Vec<u16>,
-    pub connection_state: ToServerConnectionState,
     pub protocol_version: Option<u16>,
     pub player_name: Option<String>,
     /// Encrypted password (`#1#...` SRP format or base64 legacy), populated
@@ -35,18 +33,32 @@ pub struct Session {
     pub allowed_auth_mechs: u32,
     /// Progress of the client through the connection handshake.
     ///
-    /// This replaces the old pair of booleans (`media_loading` /
-    /// `client_ready`) with a single ordered state:
+    /// The single source of truth for the session lifecycle. The
+    /// phase space mirrors the C++ `ClientState` enum
+    /// (see [`src/server/clientiface.h`](../../../../src/server/clientiface.h))
+    /// line-for-line, with all ten sub-states (`Created`,
+    /// `HelloSent`, `AwaitingInit2`, `InitDone`, `DefinitionsSent`,
+    /// `Active`, `SudoMode`, plus the terminal `Invalid`,
+    /// `Disconnecting`, `Denied`).
+    ///
+    /// It is used as the gating condition for `Startup`- and
+    /// `Ingame`-category opcodes — mirroring the C++
+    /// `getClient(peer_id, CS_InitDone)` and
+    /// `m_clients.getClientState(peer_id) >= CS_Active` checks in
+    /// [`Server::ProcessData`](../../../../src/server.cpp).
     ///
     /// ```text
-    /// Init → MediaLoading → Active
+    /// Created → HelloSent → AwaitingInit2 → InitDone → DefinitionsSent
+    ///                                                            ↓
+    ///                                                        Active ↔ SudoMode
     /// ```
     ///
-    /// - `Init`: `TOSERVER_INIT` received, `TOSERVER_INIT2` not yet. Media
-    ///   commands (`REQUEST_MEDIA`, `HAVE_MEDIA`, `GOTBLOCKS`) are rejected.
-    /// - `MediaLoading`: `TOSERVER_INIT2` received; init-data stream sent;
-    ///   media can now be requested.
-    /// - `Active`: `TOSERVER_CLIENT_READY` received; client is fully in-game.
+    /// The progression is mostly monotonic: it never goes
+    /// backwards through the handshake. The terminal
+    /// `Disconnecting`/`Denied` states can be entered from
+    /// various points. A re-sent handshake (e.g. the client
+    /// retransmitting `INIT2` after a perceived packet loss) does
+    /// *not* move the phase back; the handler simply runs again.
     pub phase: SessionPhase,
     /// `true` if this session was just created by the call that
     /// returned it. The next packet-processing turn is expected to
@@ -57,20 +69,125 @@ pub struct Session {
 
 /// Tracks the progress of a client through the connection handshake.
 ///
-/// This is a linear progression: a session is created in `Init`, advances
-/// to `MediaLoading` when `TOSERVER_INIT2` arrives, and finally to `Active`
-/// when `TOSERVER_CLIENT_READY` arrives. The state never goes backwards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The discriminants and names match the C++ `ClientState` enum
+/// (see `enum ClientState` in [`src/server/clientiface.h`](../../../../src/server/clientiface.h))
+/// line-for-line so the Rust port can mirror the C++ `ProcessData`
+/// state-machine filtering exactly. The progression is mostly
+/// monotonic — once a client has reached `Active` it does not go
+/// back to `Init`/`MediaLoading` — with the exception of the
+/// terminal `Disconnecting`/`Denied`/`SudoMode` states that can be
+/// entered from various points.
+///
+/// ```text
+/// Created → HelloSent → AwaitingInit2 → InitDone → DefinitionsSent
+///                                                          ↓
+///                                                       Active ↔ SudoMode
+/// ```
+///
+/// The C++ dispatch logic in `Server::ProcessData`
+/// (see [`src/server.cpp`](../../../../src/server.cpp)) gates
+/// incoming packets on the coarse `ToServerConnectionState`
+/// category — `NotConnected` / `Startup` / `Ingame` — but the
+/// per-handler state predicates are checked against the
+/// fine-grained `ClientState`:
+/// - `NotConnected` opcodes are accepted in **any** state (they
+///   run before the state-machine gates).
+/// - `Startup` opcodes are accepted from `InitDone` onwards (the
+///   C++ explicitly calls `getClient(peer_id, CS_InitDone)`,
+///   which asserts the state has reached `InitDone`).
+/// - `Ingame` opcodes are accepted from `Active` onwards (the
+///   `state < CS_Active` drop in `ProcessData`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum SessionPhase {
-    /// `TOSERVER_INIT` received, `TOSERVER_INIT2` not yet. Media commands
-    /// (`REQUEST_MEDIA`, `HAVE_MEDIA`, `GOTBLOCKS`, `CLIENT_READY`) are
-    /// rejected.
-    Init = 0,
-    /// `TOSERVER_INIT2` received; init-data sent; media can be requested.
-    MediaLoading = 1,
-    /// `TOSERVER_CLIENT_READY` received; client is fully connected.
-    Active = 2,
+    /// Sentinel for an unused slot. C++ `CS_Invalid`.
+    Invalid = 0,
+    /// Peer is being torn down. C++ `CS_Disconnecting`.
+    Disconnecting = 1,
+    /// Access was denied. C++ `CS_Denied`.
+    Denied = 2,
+    /// Session created, `TOSERVER_INIT` not yet received.
+    /// C++ `CS_Created`.
+    Created = 3,
+    /// `TOSERVER_INIT` processed, `TOCLIENT_HELLO` sent.
+    /// C++ `CS_HelloSent`.
+    HelloSent = 4,
+    /// Auth negotiation done, waiting for `TOSERVER_INIT2`.
+    /// C++ `CS_AwaitingInit2`.
+    AwaitingInit2 = 5,
+    /// `TOSERVER_INIT2` processed, init-data not yet fully sent.
+    /// C++ `CS_InitDone`.
+    InitDone = 6,
+    /// ItemDef/NodeDef/AnnounceMedia sent, client may request media.
+    /// C++ `CS_DefinitionsSent`.
+    DefinitionsSent = 7,
+    /// `TOSERVER_CLIENT_READY` received, fully in-game.
+    /// C++ `CS_Active`.
+    Active = 8,
+    /// Sudo mode (elevated privileges for /grant-style commands).
+    /// C++ `CS_SudoMode`.
+    SudoMode = 9,
+}
+
+impl SessionPhase {
+    /// `true` if the session has reached the "media can be
+    /// requested" stage — i.e. the C++ `CS_InitDone` floor that
+    /// `Startup`-category opcodes require.
+    ///
+    /// Mirrors `getClient(peer_id, CS_InitDone)` in
+    /// `Server::ProcessData`.
+    #[inline]
+    pub fn has_reached_init_done(self) -> bool {
+        self >= SessionPhase::InitDone
+    }
+
+    /// `true` if the session is in `Active` (or `SudoMode`, which
+    /// the C++ also counts as `>= CS_Active`).
+    ///
+    /// Mirrors `m_clients.getClientState(peer_id) >= CS_Active` in
+    /// `Server::ProcessData`.
+    #[inline]
+    pub fn is_active(self) -> bool {
+        self >= SessionPhase::Active
+    }
+
+    /// Coarse progress bucket used by the tests and by code that
+    /// doesn't need to distinguish the C++ sub-states. Returns:
+    /// - `Init` for `Created`/`HelloSent`/`AwaitingInit2`
+    /// - `MediaLoading` for `InitDone`/`DefinitionsSent`
+    /// - `Active` for `Active`/`SudoMode`
+    pub fn coarse(self) -> CoarsePhase {
+        match self {
+            SessionPhase::Created | SessionPhase::HelloSent | SessionPhase::AwaitingInit2 => {
+                CoarsePhase::Init
+            }
+            SessionPhase::InitDone | SessionPhase::DefinitionsSent => CoarsePhase::MediaLoading,
+            SessionPhase::Active | SessionPhase::SudoMode => CoarsePhase::Active,
+            SessionPhase::Invalid | SessionPhase::Disconnecting | SessionPhase::Denied => {
+                CoarsePhase::Invalid
+            }
+        }
+    }
+}
+
+/// Coarse-grained view of [`SessionPhase`] used by code that does
+/// not need the full C++ `ClientState` granularity (tests, log
+/// messages, dispatching on "have we reached media loading yet").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoarsePhase {
+    /// Session is pre-`InitDone` (any of the `Created`/
+    /// `HelloSent`/`AwaitingInit2` sub-states, plus the terminal
+    /// `Invalid`/`Disconnecting`/`Denied` bucket).
+    Invalid,
+    /// `Init` per the original 3-phase model: covers
+    /// `CS_Created`/`CS_HelloSent`/`CS_AwaitingInit2`.
+    Init,
+    /// `MediaLoading` per the original 3-phase model: covers
+    /// `CS_InitDone`/`CS_DefinitionsSent`.
+    MediaLoading,
+    /// `Active` per the original 3-phase model: covers
+    /// `CS_Active`/`CS_SudoMode`.
+    Active,
 }
 
 impl Session {
@@ -85,14 +202,13 @@ impl Session {
             next_outgoing_seqnum: SEQNUM_INITIAL,
             next_incoming_seqnum: SEQNUM_INITIAL,
             pending_acks: Vec::new(),
-            connection_state: ToServerConnectionState::NotConnected,
             protocol_version: None,
             player_name: None,
             enc_pwd: None,
             chosen_mech: 0,
             create_player_on_auth_success: false,
             allowed_auth_mechs: 0,
-            phase: SessionPhase::Init,
+            phase: SessionPhase::Created,
             newly_created: true,
         }
     }

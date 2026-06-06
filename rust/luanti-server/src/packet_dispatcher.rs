@@ -314,7 +314,7 @@ fn handle_command(
 
     session.on_packet_received();
 
-    match commands.handle_command(session, &packet, peer_addr) {
+        match commands.handle_command(session, &packet) {
         Ok(responses) => {
             let mut out = Vec::with_capacity(responses.len() + 1);
             if force_reliable {
