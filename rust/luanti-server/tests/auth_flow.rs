@@ -242,6 +242,100 @@ fn request_media_accepted_before_init2() {
 }
 
 #[test]
+fn full_handshake_memory_db() {
+    // Regression test: registering a brand-new player through the
+    // in-memory auth DB must succeed (it must NOT return
+    // "Player already exists"). The memory backend returns Err from
+    // get_auth for missing players, so the check at the top of
+    // handle_first_srp must fall through to the create branch.
+    let auth_db = luanti_auth_db::memory::AuthDatabaseMemory::new();
+    let mut handler = CommandHandler::new(37, 43, Box::new(auth_db));
+
+    let peer: SocketAddr = SocketAddrV4::from_str("127.0.0.1:12350").unwrap().into();
+    use luanti_network::Session;
+    let mut session = Session::new(42, peer);
+
+    // Step 1: INIT
+    let mut init = cmd(ToServerCommand::Init);
+    init.write_u8(29);
+    init.write_u16(0);
+    init.write_u16(37);
+    init.write_u16(43);
+    init.write_utf8("newuser");
+    let r = handler.handle_command(&mut session, &init).unwrap();
+    assert_eq!(op_of(&r[0]), ToClientCommand::Hello);
+
+    // Step 2: FIRST_SRP
+    let encoded = auth::get_encoded_srp_verifier("newuser", "pw").unwrap();
+    let (verifier, salt) = {
+        let mut v = Vec::new();
+        let mut s = Vec::new();
+        assert!(auth::decode_srp_verifier_and_salt(&encoded, &mut v, &mut s));
+        (v, s)
+    };
+    let mut first_srp = cmd(ToServerCommand::FirstSrp);
+    first_srp.write_string(&salt);
+    first_srp.write_string(&verifier);
+    first_srp.write_u8(0);
+    let r = handler.handle_command(&mut session, &first_srp).unwrap();
+    assert_eq!(
+        op_of(&r[0]),
+        ToClientCommand::AuthAccept,
+        "FIRST_SRP for a new player must return AUTH_ACCEPT, not ACCESS_DENIED"
+    );
+}
+
+#[test]
+fn duplicate_first_srp_after_auth_accept_is_ignored() {
+    // Regression: a reliable FIRST_SRP may be retransmitted by the
+    // client after the server already accepted registration. The C++
+    // server ignores it outside HelloSent; it must not return
+    // ACCESS_DENIED("Player already exists").
+    let auth_db = luanti_auth_db::memory::AuthDatabaseMemory::new();
+    let mut handler = CommandHandler::new(37, 43, Box::new(auth_db));
+
+    let peer: SocketAddr = SocketAddrV4::from_str("127.0.0.1:12351").unwrap().into();
+    use luanti_network::Session;
+    let mut session = Session::new(43, peer);
+
+    // INIT -> HELLO
+    let mut init = cmd(ToServerCommand::Init);
+    init.write_u8(29);
+    init.write_u16(0);
+    init.write_u16(37);
+    init.write_u16(43);
+    init.write_utf8("dupuser");
+    let r = handler.handle_command(&mut session, &init).unwrap();
+    assert_eq!(op_of(&r[0]), ToClientCommand::Hello);
+    assert_eq!(session.phase, SessionPhase::HelloSent);
+
+    // FIRST_SRP #1 -> AUTH_ACCEPT
+    let encoded = auth::get_encoded_srp_verifier("dupuser", "pw").unwrap();
+    let (verifier, salt) = {
+        let mut v = Vec::new();
+        let mut s = Vec::new();
+        assert!(auth::decode_srp_verifier_and_salt(&encoded, &mut v, &mut s));
+        (v, s)
+    };
+    let mut first_srp = cmd(ToServerCommand::FirstSrp);
+    first_srp.write_string(&salt);
+    first_srp.write_string(&verifier);
+    first_srp.write_u8(0);
+    let r = handler.handle_command(&mut session, &first_srp).unwrap();
+    assert_eq!(op_of(&r[0]), ToClientCommand::AuthAccept);
+    assert_eq!(session.phase, SessionPhase::AwaitingInit2);
+
+    // FIRST_SRP #2 (retransmit) -> ignored
+    let mut duplicate = cmd(ToServerCommand::FirstSrp);
+    duplicate.write_string(&salt);
+    duplicate.write_string(&verifier);
+    duplicate.write_u8(0);
+    let r = handler.handle_command(&mut session, &duplicate).unwrap();
+    assert!(r.is_empty(), "duplicate FIRST_SRP should be ignored");
+    assert_eq!(session.phase, SessionPhase::AwaitingInit2);
+}
+
+#[test]
 fn srp_bytes_a_rejects_disallowed_mech() {
     let tmp = TempDir::new().unwrap();
     let auth_db = AuthDatabaseSqlite::new(tmp.path()).unwrap();

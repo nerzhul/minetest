@@ -247,6 +247,19 @@ impl CommandHandler {
         session: &mut Session,
         packet: &mut NetworkPacket,
     ) -> Result<Vec<NetworkPacket>> {
+        // C++ only processes registration FIRST_SRP in the
+        // HelloSent state. A retransmitted reliable FIRST_SRP after
+        // AUTH_ACCEPT (phase AwaitingInit2) is ignored, not denied.
+        // Mirroring that avoids spurious "Player already exists"
+        // disconnects when the client resends before it sees our ack.
+        if session.phase != SessionPhase::HelloSent {
+            info!(
+                "Ignoring FIRST_SRP from {} in phase {:?}",
+                session.address, session.phase
+            );
+            return Ok(vec![]);
+        }
+
         let salt = packet.read_string()?;
         let verifier = packet.read_string()?;
         let is_empty = packet.read_u8()?;
@@ -264,6 +277,17 @@ impl CommandHandler {
             .clone()
             .ok_or_else(|| anyhow!("FIRST_SRP without player name"))?;
 
+        if session.allowed_auth_mechs & (AuthMechanism::FirstSrp as u32) == 0 {
+            warn!(
+                "Client from {} tried to use disallowed FIRST_SRP auth mech",
+                session.address
+            );
+            return Ok(vec![create_access_denied(
+                AccessDeniedCode::UnexpectedData,
+                "Auth mechanism not allowed",
+            )]);
+        }
+
         if is_empty == 1 {
             return Ok(vec![create_access_denied(
                 AccessDeniedCode::EmptyPassword,
@@ -271,7 +295,14 @@ impl CommandHandler {
             )]);
         }
 
-        if !session.create_player_on_auth_success && self.auth_db.get_auth(&player_name).is_ok() {
+        // FIRST_SRP is the registration path: it must only be used by
+        // a brand-new player. If the player is already in the auth DB
+        // it means either a previous successful registration, or
+        // another concurrent connection beat us to it — both are
+        // rejected with `AlreadyConnected`, mirroring the C++
+        // `Server::handleCommand_FirstSrp` check
+        // (src/network/serverpackethandler.cpp:1472).
+        if self.auth_db.get_auth(&player_name).is_ok() {
             return Ok(vec![create_access_denied(
                 AccessDeniedCode::AlreadyConnected,
                 "Player already exists",
@@ -280,30 +311,18 @@ impl CommandHandler {
 
         let enc_pwd = auth_helpers::encode_srp_verifier(&verifier, &salt);
 
-        if session.create_player_on_auth_success {
-            self.auth_db.save_auth(&luanti_auth_db::AuthEntry {
-                id: 0,
-                name: player_name.clone(),
-                password: enc_pwd.clone(),
-                privileges: vec![],
-                last_login: now_secs(),
-            })?;
-            session.create_player_on_auth_success = false;
-        } else {
-            let mut entry = luanti_auth_db::AuthEntry {
-                id: 0,
-                name: player_name.clone(),
-                password: enc_pwd.clone(),
-                privileges: vec![],
-                last_login: now_secs(),
-            };
-            self.auth_db.create_auth(&mut entry)?;
-        }
+        let mut entry = luanti_auth_db::AuthEntry {
+            id: 0,
+            name: player_name.clone(),
+            password: enc_pwd.clone(),
+            privileges: vec![],
+            last_login: now_secs(),
+        };
+        self.auth_db.create_auth(&mut entry)?;
 
         session.enc_pwd = Some(enc_pwd);
         // C++ CSE_AuthAccept after sending TOCLIENT_AUTH_ACCEPT
-        // (Server::Server::handleCommand_FirstSrp... actually
-        // Server::acceptAuth, src/server.cpp:3100):
+        // (Server::acceptAuth, src/server.cpp:3100):
         //   CS_HelloSent --CSE_AuthAccept--> CS_AwaitingInit2
         // The client must follow up with INIT2 once it receives
         // AUTH_ACCEPT.
