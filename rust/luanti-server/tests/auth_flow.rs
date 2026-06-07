@@ -362,3 +362,103 @@ fn srp_bytes_a_rejects_disallowed_mech() {
     assert_eq!(responses.len(), 1);
     assert_eq!(op_of(&responses[0]), ToClientCommand::AccessDenied);
 }
+
+#[test]
+fn srp_bytes_a_ignored_outside_auth_phase() {
+    // C++ ignores SRP_A unless state is HelloSent/Active.
+    let auth_db = luanti_auth_db::memory::AuthDatabaseMemory::new();
+    let mut handler = CommandHandler::new(37, 43, Box::new(auth_db));
+
+    let peer: SocketAddr = SocketAddrV4::from_str("127.0.0.1:12352").unwrap().into();
+    use luanti_network::Session;
+    let mut session = Session::new(52, peer);
+
+    // Created phase (before INIT): SRP_A must be ignored.
+    let mut a = cmd(ToServerCommand::SrpBytesA);
+    a.write_string(&vec![0u8; 256]);
+    a.write_u8(1);
+    let responses = handler.handle_command(&mut session, &a).unwrap();
+    assert!(responses.is_empty());
+}
+
+#[test]
+fn srp_bytes_m_denied_if_no_mech_selected() {
+    // C++ denies SRP_M when chosen_mech is not SRP/Legacy.
+    let auth_db = luanti_auth_db::memory::AuthDatabaseMemory::new();
+    let mut handler = CommandHandler::new(37, 43, Box::new(auth_db));
+
+    let peer: SocketAddr = SocketAddrV4::from_str("127.0.0.1:12353").unwrap().into();
+    use luanti_network::Session;
+    let mut session = Session::new(53, peer);
+
+    // Move to HelloSent with a valid INIT.
+    let mut init = cmd(ToServerCommand::Init);
+    init.write_u8(29);
+    init.write_u16(0);
+    init.write_u16(37);
+    init.write_u16(43);
+    init.write_utf8("srpm");
+    let _ = handler.handle_command(&mut session, &init).unwrap();
+    assert_eq!(session.phase, SessionPhase::HelloSent);
+
+    // Force a bad/out-of-sequence SRP_M without SRP_A/chosen_mech.
+    let mut m = cmd(ToServerCommand::SrpBytesM);
+    m.write_string(&vec![0u8; 32]);
+    let responses = handler.handle_command(&mut session, &m).unwrap();
+    assert_eq!(responses.len(), 1);
+    assert_eq!(op_of(&responses[0]), ToClientCommand::AccessDenied);
+}
+
+#[test]
+fn srp_bytes_m_ignored_if_mech_selected_but_no_pending_session() {
+    let auth_db = luanti_auth_db::memory::AuthDatabaseMemory::new();
+    let mut handler = CommandHandler::new(37, 43, Box::new(auth_db));
+
+    let peer: SocketAddr = SocketAddrV4::from_str("127.0.0.1:12354").unwrap().into();
+    use luanti_network::Session;
+    let mut session = Session::new(54, peer);
+
+    let mut init = cmd(ToServerCommand::Init);
+    init.write_u8(29);
+    init.write_u16(0);
+    init.write_u16(37);
+    init.write_u16(43);
+    init.write_utf8("srpm2");
+    let _ = handler.handle_command(&mut session, &init).unwrap();
+    assert_eq!(session.phase, SessionPhase::HelloSent);
+
+    // Simulate a retransmitted/out-of-order M with chosen mech already
+    // selected, but no pending SRP verifier state.
+    session.chosen_mech = luanti_network::AuthMechanism::Srp as u32;
+    let mut m = cmd(ToServerCommand::SrpBytesM);
+    m.write_string(&vec![0u8; 32]);
+    let responses = handler.handle_command(&mut session, &m).unwrap();
+    assert!(responses.is_empty());
+}
+
+#[test]
+fn srp_bytes_a_ignored_if_auth_already_in_progress() {
+    let auth_db = luanti_auth_db::memory::AuthDatabaseMemory::new();
+    let mut handler = CommandHandler::new(37, 43, Box::new(auth_db));
+
+    let peer: SocketAddr = SocketAddrV4::from_str("127.0.0.1:12355").unwrap().into();
+    use luanti_network::Session;
+    let mut session = Session::new(55, peer);
+
+    let mut init = cmd(ToServerCommand::Init);
+    init.write_u8(29);
+    init.write_u16(0);
+    init.write_u16(37);
+    init.write_u16(43);
+    init.write_utf8("srpa_dup");
+    let _ = handler.handle_command(&mut session, &init).unwrap();
+    assert_eq!(session.phase, SessionPhase::HelloSent);
+
+    // Simulate a duplicate/retransmitted SRP_A while a mech is already selected.
+    session.chosen_mech = luanti_network::AuthMechanism::Srp as u32;
+    let mut a = cmd(ToServerCommand::SrpBytesA);
+    a.write_string(&vec![0u8; 256]);
+    a.write_u8(1);
+    let responses = handler.handle_command(&mut session, &a).unwrap();
+    assert!(responses.is_empty());
+}

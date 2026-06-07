@@ -343,6 +343,25 @@ impl CommandHandler {
         session: &mut Session,
         packet: &mut NetworkPacket,
     ) -> Result<Vec<NetworkPacket>> {
+        // C++ only accepts SRP_A while in HelloSent (login) or
+        // Active (sudo). Out-of-state packets are ignored.
+        if session.phase != SessionPhase::HelloSent && session.phase != SessionPhase::Active {
+            info!(
+                "Ignoring SRP_BYTES_A from {} in phase {:?}",
+                session.address, session.phase
+            );
+            return Ok(vec![]);
+        }
+
+        // Guard against parallel/retransmitted auth starts.
+        if session.chosen_mech != AuthMechanism::None as u32 {
+            info!(
+                "Ignoring SRP_BYTES_A while auth is already in progress with mech {} from {}",
+                session.chosen_mech, session.address
+            );
+            return Ok(vec![]);
+        }
+
         let bytes_a = packet.read_string()?;
         let based_on = packet.read_u8()?;
 
@@ -399,19 +418,13 @@ impl CommandHandler {
             }
         };
 
-        let (verifier_obj, bytes_b) = SrpVerifier::new(
-            &player_name.to_lowercase(),
-            &salt,
-            &verifier,
-            &bytes_a,
-            None,
-        )
-        .map_err(|e| {
-            anyhow!(
-                "SRP safety check failed: {} (likely A mod N == 0 or invalid A)",
-                e
-            )
-        })?;
+        let (verifier_obj, bytes_b) =
+            SrpVerifier::new(&player_name, &salt, &verifier, &bytes_a, None).map_err(|e| {
+                anyhow!(
+                    "SRP safety check failed: {} (likely A mod N == 0 or invalid A)",
+                    e
+                )
+            })?;
 
         self.pending_srp.insert(
             session.peer_id,
@@ -440,15 +453,43 @@ impl CommandHandler {
         session: &mut Session,
         packet: &mut NetworkPacket,
     ) -> Result<Vec<NetworkPacket>> {
+        // C++ only accepts SRP_M while in HelloSent (login) or
+        // Active (sudo). Out-of-state packets are ignored.
+        if session.phase != SessionPhase::HelloSent && session.phase != SessionPhase::Active {
+            info!(
+                "Ignoring SRP_BYTES_M from {} in phase {:?}",
+                session.address, session.phase
+            );
+            return Ok(vec![]);
+        }
+
+        if session.chosen_mech != AuthMechanism::Srp as u32
+            && session.chosen_mech != AuthMechanism::LegacyPassword as u32
+        {
+            warn!(
+                "Got SRP_BYTES_M while auth mech is {} from {}",
+                session.chosen_mech, session.address
+            );
+            return Ok(vec![create_access_denied(
+                AccessDeniedCode::UnexpectedData,
+                "Unexpected SRP proof",
+            )]);
+        }
+
         let bytes_m = packet.read_string()?;
 
-        let mut pending = match self.pending_srp.remove(&session.peer_id) {
+        let pending = match self.pending_srp.get_mut(&session.peer_id) {
             Some(p) => p,
             None => {
-                return Ok(vec![create_access_denied(
-                    AccessDeniedCode::UnexpectedData,
-                    "No pending SRP session",
-                )]);
+                // On lossy links we can observe an SRP_M retransmit or
+                // reordering edge where A/B/M are not processed in a
+                // perfectly linear way yet. Dropping this packet is
+                // safer than disconnecting with a hard denial.
+                info!(
+                    "Ignoring SRP_BYTES_M from {} (peer {}) without pending SRP session",
+                    session.address, session.peer_id
+                );
+                return Ok(vec![]);
             }
         };
 
@@ -460,6 +501,9 @@ impl CommandHandler {
         match pending.verifier.verify_session(&bytes_m) {
             Ok(Some(_hamk)) => {
                 info!("SRP auth succeeded for {}", player_name);
+
+                // SRP handshake is complete for this peer.
+                self.pending_srp.remove(&session.peer_id);
 
                 if session.create_player_on_auth_success {
                     let mut entry = luanti_auth_db::AuthEntry {
